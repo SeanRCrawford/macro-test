@@ -37,7 +37,6 @@ import argparse
 import asyncio
 import os
 import sys
-from pathlib import Path
 
 import torch
 
@@ -61,6 +60,8 @@ def main():
     p.add_argument("--server", default=MAIN_SERVER)
     p.add_argument("--local", action="store_true", help="a local server without login (--no-security)")
     p.add_argument("--policy", action="store_true", help="play the network's policy, no search")
+    p.add_argument("--value-model", default=None,
+                   help="the search values positions with this model.pt (e.g. from search_train)")
     p.add_argument("--budget", type=int, default=2000, help="search: value evaluations per turn")
     p.add_argument("--max-seconds", type=float, default=20.0,
                    help="search: the longest a decision may take (less when the battle timer is short)")
@@ -98,12 +99,13 @@ def main():
         raise SystemExit("this team can't be played:\n  " + "\n  ".join(errors))
     torch.set_grad_enabled(False)
     model = load(a.model, a.device)
+    value_model = load(a.value_model, a.device) if a.value_model else None
     tree = None if a.policy else TreeConfig(budget=a.budget)
     seeds = iter(range(a.seed, a.seed + 1_000_000))
 
     def make_bot():
         cfg = None if tree is None else TreeConfig(**vars(tree))
-        return Bot(model, team, cfg, sample=a.sample, seed=next(seeds))
+        return Bot(model, team, cfg, sample=a.sample, seed=next(seeds), value_model=value_model)
 
     client = Client(make_bot, team, a.user, a.password or os.environ.get("SHOWDOWN_PASSWORD"),
                     server=a.server, fmt=a.format, challenge=a.challenge, accept=a.accept,

@@ -147,6 +147,7 @@ def main():
     p.add_argument("model")
     p.add_argument("--team", default=None, help="the bot's team (default: found by the battle's stats)")
     p.add_argument("--policy", action="store_true", help="the network alone, no search")
+    p.add_argument("--value-model", default=None, help="the search values positions with this model.pt")
     p.add_argument("--budget", type=int, default=2000)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--seed", type=int, default=0)
@@ -163,7 +164,8 @@ def main():
     team = complete_paste(path.read_text(encoding="utf-8-sig"))[0]
     torch.set_grad_enabled(False)
     model = load(a.model, a.device)
-    bot = Bot(model, team, None if a.policy else TreeConfig(budget=a.budget), seed=a.seed)
+    value_model = load(a.value_model, a.device) if a.value_model else None
+    bot = Bot(model, team, None if a.policy else TreeConfig(budget=a.budget), seed=a.seed, value_model=value_model)
     review(lines, bot, team)
 
 

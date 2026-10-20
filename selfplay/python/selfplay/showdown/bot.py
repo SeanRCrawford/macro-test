@@ -25,10 +25,13 @@ from selfplay.train import to_tensors
 
 
 class Bot:
-    def __init__(self, model, team: str, tree=None, sample: bool = False, seed: int = 0, log=print):
+    def __init__(self, model, team: str, tree=None, sample: bool = False, seed: int = 0, log=print,
+                 value_model=None):
         """`team`: our paste (the one uploaded). `tree`: a TreeConfig to
         search with (None: play the policy). `sample`: sample the policy
-        (or the search's mix) instead of taking its most likely action."""
+        (or the search's mix) instead of taking its most likely action.
+        `value_model`: the search values positions with this network
+        instead (one trained on search values, beside a PPO policy)."""
         self.model = model
         self.team = team
         self.env = SelfPlayEnv(1, seed=seed, threads=1)
@@ -40,7 +43,7 @@ class Bot:
         if tree is not None:
             from selfplay.mcts import TreeSearch
             tree.sample = sample
-            self.search = TreeSearch(model, tree, seed)
+            self.search = TreeSearch(model, tree, seed, value_model=value_model)
         self.foe_orders: list[tuple[tuple[int, ...], float]] = []
 
     # --- The network ----------------------------------------------------------
