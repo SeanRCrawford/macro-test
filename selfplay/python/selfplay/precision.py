@@ -1,8 +1,7 @@
 """How much reduced precision changes a model's outputs on real positions.
 
-The tree search valued its leaves in float16 until it moved to bfloat16
-(what training and every evaluation used). This measures both against
-float32: the values the search uses (mean and largest difference, how
+The tree search values its leaves in float16; training and the
+evaluations use bfloat16. This measures both against float32: the values the search uses (mean and largest difference, how
 often one is off by more than 0.1, any that come out infinite or NaN), the
 policy's most likely action, and the largest activation inside the network
 (float16 overflows past 65,504).

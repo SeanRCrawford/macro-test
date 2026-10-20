@@ -1205,13 +1205,14 @@ of the loss above it leaves the bot 76 of 116 joint actions and the
 opponent's model 54 of 78. The endgame search still matches brute force
 over every legal action.
 
-**The search's precision.** The tree search valued its leaves in float16
-while the network trained and was evaluated in bfloat16; float16's range
-was never checked on the larger networks, and an overflow there would
-make the search's estimates meaningless while the network alone looks
-fine (near-zero win estimates, incoherent play). The search now uses
-bfloat16, `selfplay.precision MODEL` measures both against float32 on real
-positions, and each decision line shows the network's own estimate
+**The search's precision.** The tree search values its leaves in float16
+while the network trains in bfloat16; an overflow in float16 would have
+made the search's estimates meaningless while the network alone looked
+fine. Measured on ppo6k (`selfplay.precision`, 4,096 positions, against
+float32): float16 values off by 0.0003 on average (largest 0.009), the
+policy's most likely action the same 98.4% of the time; bfloat16 0.0022
+(largest 0.052) and 90.6%; nothing infinite. float16 is the closer of the
+two and stays. Each decision line shows the network's own estimate
 (float32) beside the search's.
 
 **Ties the search breaks badly.** The Ice Beam turn, rebuilt from the log:
