@@ -1257,6 +1257,33 @@ help twice. That is the case for training the policy on the search's
 choices (search_train) now that the networks are larger, though at 1.8M
 parameters it didn't help (4.17).
 
+**Against mikumiku37's actual replies** (`selfplay.showdown.diagnose`, the
+two readable losses, 15 decisions where the reply can be read from the
+log; each setting's choice scored against that reply after the turn, by
+the network's value and by the HP margin, against the best legal action;
+three searches per setting):
+
+| setting | value | regret | HP | reply considered | its weight |
+|---|---|---|---|---|---|
+| policy alone | -0.51 | 0.31 | -1.27 | - | - |
+| budget 500 | -0.49 | 0.29 | -0.99 | 40% | 0.24 |
+| budget 2,000 (default) | -0.42 | 0.23 | -0.99 | 60% | 0.26 |
+| budget 8,000 | -0.45 | 0.25 | -1.10 | 73% | 0.28 |
+| 8 root candidates, 24 max | -0.48 | 0.28 | -1.07 | 80% | 0.30 |
+| oracle over every action | -0.54 | 0.34 | -1.14 | 47% | 0.28 |
+| full-width root | -0.45 | 0.25 | -1.03 | 53% | 0.32 |
+
+mikumiku37's reply was the 5th most likely in the bot's prediction of the
+opponent (median), in its top 4 only 40% of the time, outside its top 24
+twice (invisible to the search), with 0.18 of the predicted probability
+on average. Searching wider or longer considers the reply more often but
+doesn't choose better against it: the differences are within the noise of
+15 decisions, and the largest losses come from turns where the search
+expected the reply (96% on it) and misjudged the outcomes. The default
+stays. What would move the result: a picture of the opponent fitted to
+how mikumiku37 actually plays (its moves from many games: RotomDotExe's
+route), and better values.
+
 **Search budget.** 6,000 against 2,000 (both ppo5, both searching, 404
 games): 0.520 +-0.049, though the larger side looked at 8,220 leaves a
 root against 2,852. Past 2,000 the search gains little with these
