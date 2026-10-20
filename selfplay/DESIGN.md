@@ -1246,8 +1246,16 @@ and plays one of them; the reply mikumiku37 chose (Mega Floette's
 Moonblast into Tyranitar) gets 5% from the network's model of the
 opponent, because in self-play Floette rarely lives to use it. The values
 are calibrated against opponents that play like the bot, and the search
-leans on them in lines self-play never visits. Whether the search still
-helps against the policy is the next measurement.
+leans on them in lines self-play never visits.
+
+**Search against the policy** (ppo6k on both sides, the tree search at
+2,000 playing its mix's choice against the network's most likely action,
+102 games on the CPU): **0.931 +-0.049**, some +450 Elo. The search does
+most of the bot's playing; the policy alone is weak, and since the
+search's picture of the opponent is that policy, a stronger policy would
+help twice. That is the case for training the policy on the search's
+choices (search_train) now that the networks are larger, though at 1.8M
+parameters it didn't help (4.17).
 
 **Search budget.** 6,000 against 2,000 (both ppo5, both searching, 404
 games): 0.520 +-0.049, though the larger side looked at 8,220 leaves a
