@@ -166,6 +166,7 @@ def test_tree_search_reports_its_lookahead_and_root_share_deepens_it():
             assert len(r["lookahead"]) == len(r["static_share"]) == cells
             assert all(0 <= x <= 1 + 1e-5 for x in r["static_share"])
             assert r["depth_nodes"][0] == 1
+            assert len(r["oracle_gain"]) == len(r["unprobed"]) == 2 and min(r["oracle_gain"]) >= 0
             total.append(lookahead_of(r, search.pick(r, 0)))
         looks[share] = float(np.mean(total))
     assert looks[0.3] > looks[1.0]

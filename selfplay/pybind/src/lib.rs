@@ -775,7 +775,10 @@ impl MctsForest {
     /// ((side 0 action, side 1 action), value, outcome probability),
     /// lookahead and static_share (per matrix cell: turns its value looks
     /// beyond the first, and the share that is the value network's view one
-    /// turn later), and depth_nodes (searched nodes per depth).
+    /// turn later), depth_nodes (searched nodes per depth), and per side
+    /// oracle_gain and unprobed (the most an action of the root's pool
+    /// outside the candidates gains against the other side's mix, and how
+    /// many weren't probed against it).
     fn results(&self, py: Python<'_>) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
         self.forest
             .results()
@@ -806,6 +809,8 @@ impl MctsForest {
                 d.set_item("lookahead", r.lookahead)?;
                 d.set_item("static_share", r.static_share)?;
                 d.set_item("depth_nodes", r.depth_nodes)?;
+                d.set_item("oracle_gain", (r.oracle_gain[0], r.oracle_gain[1]))?;
+                d.set_item("unprobed", (r.unprobed[0], r.unprobed[1]))?;
                 Ok(d.unbind())
             })
             .collect()

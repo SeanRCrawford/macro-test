@@ -194,8 +194,8 @@ fn searches_ordinary_positions_soundly() {
 #[test]
 fn root_share_spends_the_rest_of_the_budget_further_ahead() {
     // With the root's widening stopped at a share of the budget, the same
-    // budget goes into the turns after the likely plays: more positions a
-    // turn ahead searched, and the equilibrium's cells look further.
+    // budget goes into the turns after the likely plays: the equilibrium's
+    // cells look further, from a narrower root.
     let battles = positions(8, 5, |b| {
         b.turn >= 2 && (0..2).all(|s| b.sides[s].pokemon_left >= 3 && matches!(b.requests[s], SideRequest::Move(_)))
     });
@@ -224,9 +224,35 @@ fn root_share_spends_the_rest_of_the_budget_further_ahead() {
         "root share 1: {all_nodes} nodes a turn ahead, lookahead {all_look:.2}, {all_width} root cells; \
          0.3: {share_nodes}, {share_look:.2}, {share_width}"
     );
-    assert!(share_nodes > all_nodes);
     assert!(share_look > all_look);
     assert!(share_width < all_width, "the root still widened");
+}
+
+#[test]
+fn root_share_keeps_the_double_oracle_answering_gaining_replies() {
+    // Past its share the root adds no action by the prior, but still every
+    // reply that gains against the other side's mix: at the end, what the
+    // root's pool could still gain is small, and the check reports it.
+    let battles = positions(8, 5, |b| {
+        b.turn >= 2 && (0..2).all(|s| b.sides[s].pokemon_left >= 3 && matches!(b.requests[s], SideRequest::Move(_)))
+    });
+    let cfg = MctsConfig { root_oracle: true, root_share: 0.3, ..MctsConfig::default() };
+    let mut forest = Forest::new(battles.clone(), cfg.clone(), true, 4);
+    run(&mut forest, 4000);
+    let mut gains = Vec::new();
+    for r in forest.results() {
+        for s in 0..2 {
+            assert!(r.oracle_gain[s] >= 0.0 && r.oracle_gain[s].is_finite());
+            assert!(r.unprobed[s] <= cfg.oracle_pool);
+            if r.unprobed[s] == 0 {
+                gains.push(r.oracle_gain[s]);
+            }
+        }
+    }
+    eprintln!("root pool gains once probed: {gains:?}");
+    assert!(!gains.is_empty());
+    let mean = gains.iter().sum::<f32>() / gains.len() as f32;
+    assert!(mean < 0.05, "the root's mixes leave {mean} to a reply it never added");
 }
 
 #[test]

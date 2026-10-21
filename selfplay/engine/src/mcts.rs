@@ -117,9 +117,10 @@ pub struct MctsConfig {
     /// oracle). A probe that becomes a candidate, or that an endgame's proof
     /// needs, is redone with the node's full number.
     pub probe_outcomes: usize,
-    /// The root widens only until the tree has spent this share of its
-    /// budget; the rest goes below it, into the turns after its likely
-    /// plays (1: the root may widen all along).
+    /// The root widens by the prior only until the tree has spent this
+    /// share of its budget; the rest goes below it, into the turns after its
+    /// likely plays, and the root's double oracle only adds a reply that
+    /// gains against the other side's mix (1: the root may widen all along).
     pub root_share: f32,
     pub seed: u64,
 }
@@ -523,6 +524,29 @@ impl SimTree {
         (w > 0.0).then(|| (v / w) as f32)
     }
 
+    /// At the root: the most any action of `side`'s pool outside its
+    /// candidates gains against the other side's mix (as last probed, from
+    /// `side`'s point of view; 0 if none gains), and how many of them
+    /// haven't been probed against that mix yet.
+    fn root_check(&self, side: usize, cfg: &MctsConfig) -> (f32, usize) {
+        let n = &self.nodes[0];
+        if !n.has_prior || n.solved.is_nan() || n.k[0] == 0 || n.k[1] == 0 {
+            return (f32::NAN, 0);
+        }
+        let support = n.support(1 - side, SUPPORT);
+        let len = n.ranked[side].len();
+        let end = if n.widen == Widen::Full || cfg.oracle_pool == 0 { len } else { cfg.oracle_pool.min(len) };
+        let sign = if side == 0 { 1.0 } else { -1.0 };
+        let (mut gain, mut unprobed) = (0.0f32, 0usize);
+        for p in n.k[side]..end.max(n.k[side]) {
+            match self.reply_value(0, side, n.ranked[side][p].0, &support) {
+                Some(q) => gain = gain.max(sign * (q - n.solved)),
+                None => unprobed += 1,
+            }
+        }
+        (gain, unprobed)
+    }
+
     /// One double-oracle step for `side` at a node: probe every action of
     /// its pool outside the candidates against the other side's mix, then
     /// add the one that gains most over the node's value, if any gains
@@ -646,6 +670,32 @@ impl SimTree {
                     }
                 }
                 Widen::Full => {}
+                Widen::RootOracle if ni == 0 && self.leaf_evals >= self.root_limit => {
+                    // Past its share: no more widening by the prior, but a
+                    // reply that gains against the other side's mix still
+                    // joins (looked for less and less often while none
+                    // does), so the root stays an equilibrium of its pool as
+                    // the values below it deepen.
+                    let n = &self.nodes[ni];
+                    let visits = n.visits;
+                    let side = (visits % 2) as usize;
+                    let room = n.k[side] < cfg.max_candidates.max(1).min(n.ranked[side].len());
+                    if solved && room && visits >= n.oracle_due[side] {
+                        let before = want_cells.len();
+                        match self.oracle_step(ni, side, cfg, want_cells) {
+                            Step::Busy(true) => return true,
+                            Step::Busy(false) => {}
+                            Step::Added => {
+                                if want_cells.len() == before {
+                                    self.resolve_now(ni, cfg);
+                                }
+                                self.nodes[ni].oracle_due[side] = visits + 1;
+                                return true;
+                            }
+                            Step::NoGain => self.nodes[ni].oracle_due[side] = visits * 2,
+                        }
+                    }
+                }
                 _ if ni == 0 && self.leaf_evals >= self.root_limit => {}
                 widen => {
                     // Progressive widening.
@@ -1028,6 +1078,11 @@ pub struct RootResult {
     pub static_share: Vec<f32>,
     /// Searched nodes (solved matrices) at each depth (0: the root).
     pub depth_nodes: Vec<usize>,
+    /// Per side: the most an action of its root pool outside the candidates
+    /// gains against the other side's mix (as probed; 0: none gains), and
+    /// how many of them weren't probed against that mix.
+    pub oracle_gain: [f32; 2],
+    pub unprobed: [usize; 2],
 }
 
 #[derive(Debug, Clone)]
@@ -1450,6 +1505,8 @@ impl Forest {
                     lookahead,
                     static_share,
                     depth_nodes,
+                    oracle_gain: [0, 1].map(|s| t.root_check(s, &self.cfg).0),
+                    unprobed: [0, 1].map(|s| t.root_check(s, &self.cfg).1),
                 }
             })
             .collect()
