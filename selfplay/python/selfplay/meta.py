@@ -51,14 +51,19 @@ def meta_teams(env: SelfPlayEnv, vs: list[str]) -> list[int]:
 @torch.no_grad()
 def play_matchups(model, env: SelfPlayEnv, pairs: list[tuple[int, int]], games_per_pair: int,
                   greedy: bool = False, report_every: float = 30.0) -> dict:
-    """Play every (side 0 team, side 1 team) pair `games_per_pair` times
-    (about), the model on both sides. Returns {pair: [side 0 score, games]}."""
+    """Play every (side 0 team, side 1 team) pair `games_per_pair` times,
+    the model on both sides. Returns {pair: [side 0 score, games]}."""
     env.set_matchups(pairs)
     n = env.num_envs
     current = [env.game_teams(g) for g in range(n)]
     tally = {p: [0.0, 0] for p in pairs}
     target = len(pairs) * games_per_pair
     done = 0
+    # The env deals the pairs out in order (finished games restart in game
+    # order) and plays on past the target: only the scheduled games count,
+    # so short games aren't favoured at the end.
+    slot = list(range(n))
+    next_slot = n
     start = last = time.time()
     while done < target:
         obs = env.observe()
@@ -69,11 +74,14 @@ def play_matchups(model, env: SelfPlayEnv, pairs: list[tuple[int, int]], games_p
             actions.reshape(-1)[rows] = a.numpy()
         r = env.step(actions)
         for g in np.flatnonzero(r.done):
-            t = tally[current[g]]
-            t[0] += (r.reward[g, 0] + 1) / 2
-            t[1] += 1
+            if slot[g] < target:
+                t = tally[current[g]]
+                t[0] += (r.reward[g, 0] + 1) / 2
+                t[1] += 1
+                done += 1
+            slot[g] = next_slot
+            next_slot += 1
             current[g] = env.game_teams(g)
-            done += 1
         if time.time() - last > report_every:
             last = time.time()
             print(f"  {done}/{target} games, {done / (last - start):.0f}/s", flush=True)

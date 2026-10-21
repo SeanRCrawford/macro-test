@@ -1476,6 +1476,72 @@ backoff after a drop and starts a battle's state over from the
 the commands the arena takes (no replays, no /leave). A random-team ladder
 battle is conceded: the bot plays only its paste. A test plays the client
 against a stand-in arena.
+### 4.21 Team builder
+
+`selfplay.build`: a search over teams for one that does well against a
+field (the placed teams), as the bot plays them.
+
+**What predicts a matchup.** The network's value at team preview (both
+teams' full sheets, one evaluation per matchup; averaged over both sides)
+against policy-vs-policy games (ppo6k, CPU):
+
+- 12 corpus teams x 12 Top-8 teams, 60 games a matchup (8,640 games):
+  correlation 0.74 per matchup (game noise alone would allow ~0.95), 0.91
+  per team averaged over the 12.
+- 24 one-change variants of lovejapanfrombr's sand team x 12 Top-8 teams,
+  60 games a matchup (18,000): 0.85 per matchup; per team 0.61, against a
+  ceiling of ~0.90 from game noise (the variants' scores spread by 0.039,
+  the noise 0.017), and the estimate spreads them half as much as the
+  games do.
+
+So the estimate is a screen, not a judge: it finds which few of hundreds
+of variants deserve games, and the games decide. The largest changes in
+that test were the ones a player would expect: Salamence without its
+Mega Stone (-0.09), without Tailwind (-0.06), or replaced by
+Arcanine-Hisui (-0.16); none of the gains (Excadrill's Earthquake for Rock
+Slide, +0.03) was beyond the noise of 720 games.
+
+**The search** is a local search with racing:
+
+1. One-change variants, a few hundred a step: a member swapped (drawn by
+   how often Reg M-C players pair it with the other five, from the usage
+   stats' teammates, times the square root of its usage), or one move,
+   item, ability, spread or Mega Evolution changed (from what players run
+   on it). Only legal teams with supported moves, abilities and items.
+2. The preview estimate of each against the field; the best dozen go on.
+3. Successive halving: the dozen and the current team play every field
+   team (4, then 8, then 16 games a side), the better half by score going
+   on each round; the current team always stays, for the comparison.
+4. The best challenger replaces the current team if its score is better by
+   more than a standard error.
+
+The score blends the weighted mean win rate (70%) with the mean of the
+worst quarter of matchups (30%): good overall and no hard counter, rather
+than the mean alone, which a team can raise by crushing weak matchups.
+Choosing the best of many noisy estimates biases the winner's estimate up,
+so the last word is a fresh evaluation of the final team and the start on
+the same new games.
+
+**The type rules** are the user's, by member: at most one type that 3+
+members are weak to, seven that exactly 2 are, four where the weak members
+outnumber the resisting by one, none where they do by two or more; at most
+two Mega Stones. Immunity abilities count; a Mega Stone holder counts as
+its Mega. The sand team breaks the first (Fire hits Excadrill, Gholdengo
+and Rillaboom; Ground hits Tyranitar, Excadrill and Gholdengo), so from a
+team that breaks the rules a variant must break fewer, and the search
+walks into them.
+
+**What the evaluation can't see.** The bot plays both sides, so a team is
+rated as the bot plays it: one it hasn't practised (most variants) may
+rate low until it has. Finalists belong in data/my_teams for a stretch of
+training, then a fresh rating. And the opponents play like the bot, not
+like the players who placed with those teams.
+
+Counting the games: the env deals a schedule out in order and plays on
+past its end, so taking the first N finished games favoured short games
+(a bias toward quick wins and losses). The builder, `selfplay.teams` and
+`selfplay.meta` now count exactly the scheduled games.
+
 ## 5. Model and training (provisional; settled in phases 2–3)
 
 Two recipes have reached #1 in Reg M-C:

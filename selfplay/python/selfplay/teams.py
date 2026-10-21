@@ -79,9 +79,15 @@ def play(model, env: SelfPlayEnv, pairs: list[tuple[int, int]], amp: bool,
     env.set_matchups(pairs)
     n = env.num_envs
     current = [env.game_teams(g) for g in range(n)]
-    results = []
+    # The env deals the schedule out in order (finished games restart in game
+    # order) and plays on past its end: only scheduled games count, so the
+    # short ones aren't favoured at the end.
+    slot = list(range(n))
+    next_slot = n
+    results: list = [None] * len(pairs)
+    left = len(pairs)
     start = last = time.time()
-    while len(results) < len(pairs):
+    while left:
         obs = env.observe()
         rows = np.flatnonzero(obs.decisions.reshape(-1) != 0)
         actions = np.full((n, 2), -1, np.int64)
@@ -90,15 +96,20 @@ def play(model, env: SelfPlayEnv, pairs: list[tuple[int, int]], amp: bool,
             actions.reshape(-1)[rows] = a.numpy()
         r = env.step(actions)
         for g in np.flatnonzero(r.done):
-            a_, b_ = current[g]
-            results.append((a_, b_, float(r.reward[g, 0] + 1) / 2))
+            if slot[g] < len(pairs):
+                a_, b_ = current[g]
+                results[slot[g]] = (a_, b_, float(r.reward[g, 0] + 1) / 2)
+                left -= 1
+            slot[g] = next_slot
+            next_slot += 1
             current[g] = env.game_teams(g)
         if time.time() - last > report_every:
             last = time.time()
-            rate = len(results) / (last - start)
-            left = (len(pairs) - len(results)) / max(rate, 1e-9)
-            print(f"  {len(results):,}/{len(pairs):,} games, {rate:.0f}/s, ~{left / 60:.0f} min left", flush=True)
-    return results[:len(pairs)]
+            done = len(pairs) - left
+            rate = done / (last - start)
+            print(f"  {done:,}/{len(pairs):,} games, {rate:.0f}/s, ~{left / max(rate, 1e-9) / 60:.0f} min left",
+                  flush=True)
+    return results
 
 
 def schedule(rated: list[int], pool: list[int], top: list[int], games: int,

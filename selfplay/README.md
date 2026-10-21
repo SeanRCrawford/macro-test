@@ -94,8 +94,16 @@ Training plays the tournament teams in `data/corpus` (weighted by
 placement in the file name) plus your teams in `../data/teams` and
 `../data/my_teams` (weight 4, as a top-8 team). Teams from those folders
 are named "teams/<file>" and "my_teams/<file>". Teams that aren't legal or
-use something the engine doesn't support are left out;
-`SelfPlayEnv(1).rejected()` lists them with the reason.
+use something the engine doesn't support are left out. After adding
+pastes, check what loaded:
+
+    python -m selfplay.corpus
+
+lists each folder's teams and share of the games, the weights, and every
+paste left out with the reason (and the moves, abilities or items not
+implemented yet, by how many teams need them). Then train on from the
+latest model (`--init`, with `--lr-warmup`); Pokemon the network hasn't
+met start unpractised and come with training.
 
 ## Play against the bot
 
@@ -115,6 +123,29 @@ Plays each team against every placed tournament team (Champion to Top 32),
 on both sides, with the bot playing both, and ranks the teams by win rate
 (plain and weighted by the opponents' placement), with their worst
 matchups. The CSV has every matchup.
+
+## Build a team
+
+    python -m selfplay.build runs/ppo8/model.pt --start "lovejapanfrombr's Salamence Sand Team" --keep Tyranitar Excadrill --minutes 120 --device cuda --out runs/build/sand
+    python -m selfplay.build runs/ppo8/model.pt --keep Tyranitar Excadrill --minutes 120 --device cuda --out runs/build/core
+
+Searches for a team that does well against the placed teams (`--vs`,
+`--top 8`): from `--start`, or from a team built around `--keep` by who
+players pair with whom. Each step makes a few hundred one-change variants
+(a Pokemon, move, item, ability, spread or Mega swapped, drawn from Reg
+M-C usage; `--keep` Pokemon stay), screens them by the network's win
+estimate at team preview against every field team, and races the best
+dozen and the current team in games, keeping the better half each round;
+a challenger that wins by a standard error replaces the current team. The
+score blends the mean win rate with the worst quarter of matchups
+(`--tail`, `--alpha`). Type rules (`--no-rules` to drop them): at most one
+type 3+ members are weak to, seven types exactly 2 are weak to, four types
+where the weak outnumber the resisting by one, none where they do by two,
+and two Mega Stones; a start that breaks them may only change toward them.
+Each step prints the change tried and whether it was kept; at the end the
+team and the start play the field again on fresh games, and
+runs/build/.../report.txt has the team's paste, every matchup with the
+bring the bot picked, and its leads and brings by win rate.
 
 ## Team ratings
 
