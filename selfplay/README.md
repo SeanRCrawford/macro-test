@@ -166,7 +166,7 @@ bot's team by the battle's stats (or give `--team`).
 To see where the bot loses against one opponent over many battles, and
 which search settings would do better against it:
 
-    python -m selfplay.showdown.diagnose runs/ppo7/model.pt "runs/showdown/*.log" --opponent mikumiku37 --settings policy default root_share=0.3 budget=8000 budget=8000,root_share=0.3 --judge-budget 2000 --quiet --device cuda
+    python -m selfplay.showdown.diagnose runs/ppo7/model.pt "runs/showdown/*.log" --opponent mikumiku37 --settings policy default budget=8000 budget=16000,root_share=0.5 budget=16000,root_share=0.5,oracle_pool=0 --judge-budget 2000 --quiet --device cuda
 
 For every decision whose reply the log shows, it reports whether the bot
 expected the reply (its rank in the prediction, whether the search
@@ -174,9 +174,10 @@ considered it), how good the reply was against what the bot played, and
 how each setting's choice scores against it: one turn later by the
 network, and with `--judge-budget` by a search from the position the turn
 leaves (so a move that pays off the turn after counts). Also how many
-turns past the current one each setting looked. Search settings are
+turns past the current one each setting looked, and how exposed its mix
+was (the most a reply it checked but left out would gain). Search settings are
 `key=value` over the tree search's options; the client takes them as
-`--search`, e.g. `--budget 8000 --search root_share=0.3`. Each decision
+`--search`, e.g. `--budget 16000 --search root_share=0.5`. Each decision
 line also says how far the search looked ("looked 0.3 turns past this
 one").
 

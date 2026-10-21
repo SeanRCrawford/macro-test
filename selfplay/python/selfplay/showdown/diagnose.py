@@ -409,6 +409,9 @@ def diagnose(model, decisions: list[Decision], settings: list[str], seeds: int, 
                 "weight": float(sum(w for b, w in zip(c1, r["col"]) if b in d.reply)) if "candidates" in r else float("nan"),
                 "lookahead": lookahead_of(r, a),
                 "estimate": float(r["value"]) if "value" in r else float("nan"),
+                # The most a reply of theirs the root checked but left out
+                # would gain against its mix (their view).
+                "exposed": float(r["oracle_gain"][1]) if "oracle_gain" in r else float("nan"),
             }
         if d.played:
             a = d.played[0]
@@ -492,7 +495,7 @@ def summary(result: dict, out=print, games: list | None = None):
     out("\n3. Was the bot's answer good, against the reply it got?")
     deep = any("best_deep" in r for r in rows)
     out(f"   {'setting':30s} {'value':>7s} {'regret':>7s} {'HP':>6s}" + (f" {'deeper':>7s} {'regret':>7s}" if deep else "")
-        + f" {'looks ahead':>11s} {'estimate':>8s} {'s/decision':>10s}")
+        + f" {'looks ahead':>11s} {'exposed':>7s} {'estimate':>8s} {'s/decision':>10s}")
     lines = [("played in the game", [r["played"] for r in played], None)] if played else []
     lines += [(s, [r["settings"][s] for r in rows], s) for s in settings]
     for name, xs, s in lines:
@@ -508,7 +511,8 @@ def summary(result: dict, out=print, games: list | None = None):
         look = mean(x["lookahead"] for x in xs) if s is not None else float("nan")
         est = mean(x["estimate"] for x in xs) if s is not None else float("nan")
         secs = stats[s]["seconds"] / len(rows) if s is not None and s in stats else float("nan")
-        line += f" {look:11.2f} {est:+8.3f} {secs:10.2f}"
+        exposed = mean(x["exposed"] for x in xs) if s is not None else float("nan")
+        line += f" {look:11.2f} {exposed:7.3f} {est:+8.3f} {secs:10.2f}"
         out(line.replace("nan", "  -").replace("+  -", "   -"))
     for s in settings:
         xs = [(r, r["settings"][s]) for r in rows if np.isfinite(r["settings"][s]["considered"])]
@@ -528,7 +532,8 @@ def summary(result: dict, out=print, games: list | None = None):
             f"and the best one turn ahead too in {mean(r['best_deep_is_best1'] for r in b):.0%}")
     out("   (value: the network's estimate one turn later, side 0's, -1 to 1; regret: the best legal action's "
         "value against the same reply less this; deeper: a search's value of the position the turn leaves; "
-        "looks ahead: turns past this one the search looked for its choice; estimate: the search's own value)")
+        "looks ahead: turns past this one the search looked for its choice; exposed: the most a reply the root "
+        "checked but left out would gain against its mix; estimate: the search's own value)")
 
 
 def main():

@@ -1360,6 +1360,40 @@ judged by itself. Measured again (ppo6k, the logs above):
   it won 58% of these games: its opening plays pay off after the turn
   the view sees.
 
+**Depth without losing the reply.** The first `root_share` stopped the
+root's double oracle with its widening, so at 8,000 with 0.3 the reply was
+among the candidates less often (66%) than at a plain 8,000 (80%). Now,
+past its share, the root stops adding actions by the prior but still adds
+any reply that gains against the other side's mix (looked for at
+doubling intervals while none does), so it stays an equilibrium of its
+pool as the values below deepen. The root reports, per side, the most an
+action of its pool left out would gain against the other's mix ("exposed"
+below; their side) and how many it never probed. That is the measure that
+doesn't depend on the opponent: not whether the bot predicts mikumiku37's
+move, but whether any move it has would do much better against the bot's
+mix. The same 35 positions:
+
+| setting | root candidates | turns past the first | network one turn later | their reply considered | weight on it | exposed (mean; > 0.02) | unprobed |
+|---|---|---|---|---|---|---|---|
+| default (2,000) | 7.3 x 7.1 | 0.25 | 67% | 63% | 0.15 | 0.014; 11% | 4.9 |
+| 8,000, root_share=0.3 | 8.7 x 8.9 | 0.92 | 30% | 74% | 0.20 | 0.007; 9% | 2.0 |
+| 8,000 | 11.3 x 11.1 | 0.89 | 33% | 80% | 0.21 | 0.001; 3% | 1.2 |
+| 16,000, root_share=0.5 | 11.6 x 11.3 | 1.21 | 18% | 80% | 0.24 | 0.005; 9% | 0.3 |
+| 16,000, root_share=0.5, every legal reply | 10.7 x 10.7 | 0.95 | 29% | 89% | 0.25 | 0.008; 26% | 13.3 |
+
+The pool is the policy's top 24, and 11% of mikumiku37's replies lie
+outside it, never checked. Checking every legal reply (`oracle_pool=0`)
+puts the reply among the candidates 89% of the time, and finds a reply
+outside the top 24 that gains more than 0.02 against the bot's mix in
+26% of positions: real exposure the default never sees. But at 16,000 it
+can't finish (13 replies unprobed on average) and gives up depth. A full
+two-turn search (every pair of the first turn valued by solving the
+second) would cost ~150,000 evaluations for a 6 x 6 first turn, over a
+minute a decision; 16,000 with root_share=0.5 (~8 s on the GPU) looks 1.2
+turns past the first on the lines both sides are likely to play, as wide
+as a plain 8,000. Which of these wins is for the deeper judge and the
+matches to say.
+
 So the search's shape, not the value network, is the first thing to fix:
 it should look past the next turn on the lines that matter. Training on
 mikumiku37's games isn't the way (a few hundred decisions, from a network
