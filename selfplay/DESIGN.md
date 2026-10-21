@@ -1306,11 +1306,67 @@ the search, 0.251 with the policy alone.
   policy): 0.491 +-0.049 against ppo7's own values, and ~50 games a minute
   against PPO's ~13,000. Shelved.
 
-So no one fault: mikumiku37 chooses better, in ways self-play doesn't
-predict. The lever left is strong bots' actual play: VGC Arena publishes
-every finished battle (`/api/battles`, logs as a spectator saw them),
-from which the bot's prediction of the opponent, and perhaps its policy,
-could learn.
+**What the earlier diagnosis missed.** It scored every choice by the
+network's value one turn later, so a move that pays off on the turn after
+(speed control, a switch, setting up) couldn't show, and the network was
+judged by itself. Measured again (ppo6k, the logs above):
+
+- **The win estimates are good.** Over 587 decisions against mikumiku37
+  with a logged estimate, the search's Brier score is 0.116 and the
+  network's alone 0.116, against 0.149 for a rule fitted to the same games
+  on HP and Pokemon left (leave one game out) and 0.241 for always
+  guessing the average. Under 20% the bot won 2% of 190 decisions' games:
+  the turns where it "gives up" were lost. But the search's estimate is
+  the network's (0.04 apart on average, 0.15 or more 5% of the time): it
+  barely revises the network's judgement, because it barely looks ahead.
+- **The search looks about one turn ahead.** On 35 positions from those
+  games (not endgames), the default search (2,000 evaluations) searched 26
+  positions a turn ahead and 23 deeper; over both sides' equilibrium play
+  its cells look 0.33 turns past their own, and 62% of their value is the
+  network's view of the position one turn later. Most of the budget goes
+  into widening the root (the double oracle's probes): a full first turn,
+  little after it. mikumiku37 looks two turns ahead for its top plays.
+
+  | setting | evaluations | turns past the first | value from the network one turn later | their reply considered |
+  |---|---|---|---|---|
+  | default (2,000) | 2,086 | 0.33 | 62% | 63% |
+  | max_candidates=6 | 2,108 | 0.42 | 54% | 60% |
+  | root_share=0.5 | 2,092 | 0.68 | 39% | 54% |
+  | root_share=0.3 | 2,103 | 0.81 | 31% | 49% |
+  | budget=8,000 | 8,085 | 0.86 | 34% | 80% |
+  | budget=8,000, root_share=0.3 | 8,087 | 1.11 | 20% | 66% |
+
+  `root_share` (new) stops the root's widening once that share of the
+  budget is spent, so the rest goes into the turns after its likely plays.
+  At the same cost it looks as far as four times the budget, at the price
+  of a narrower first turn; with 8,000 it does both. The bot used ~1 s a
+  decision on the GPU at 2,000, against the 20 it may take, so a larger
+  budget costs nothing in real games. The earlier budget match (6,000
+  against 2,000, 0.520) spent its extra budget on width.
+- **The reply.** Over 462 decisions where the log shows both sides'
+  actions: mikumiku37's reply was the bot's policy's 4th most likely
+  (median; first 24%, top 4 56%), and the default search had it among its
+  candidates in 63% of decisions (midgame sample). Judged by the bot's own
+  one-turn view, against what the bot played, it was mikumiku37's best
+  reply 29% of the time, top 3 44%, in the bottom half 7%; and it was
+  better for mikumiku37 than the reply the bot's policy thought most
+  likely by 0.11 on average (better in 38% of decisions, worse in 14%). The
+  bot's picture of the opponent is its own policy, which expects weaker
+  play than mikumiku37's.
+- **Where the bot loses.** Its own move against the actual reply ranked
+  7th (median) of its options; regret 0.52 on turn 1, 0.34 on turns 2-3,
+  0.17 after. On turn 1 mikumiku37's reply was its best in our one-turn
+  view only 12% of the time (0.38 left on the table by that view), yet
+  it won 58% of these games: its opening plays pay off after the turn
+  the view sees.
+
+So the search's shape, not the value network, is the first thing to fix:
+it should look past the next turn on the lines that matter. Training on
+mikumiku37's games isn't the way (a few hundred decisions, from a network
+we can't see, would only be copied); its logs are the test set.
+`diagnose --judge-budget N` now judges each answer by a search of N
+evaluations from the position the turn leaves, so settings that look
+deeper get their due, and the matches below settle it on results.
 
 **Search budget.** 6,000 against 2,000 (both ppo5, both searching, 404
 games): 0.520 +-0.049, though the larger side looked at 8,220 leaves a
