@@ -159,18 +159,21 @@ def score_actions(model, position: str, ours: list[int], theirs: list[int], seed
     return vals.reshape(len(ours), n).mean(1), hps.reshape(len(ours), n).mean(1)
 
 
-def diagnose(model, logs: list[Path], settings: list[str], seeds: int, dev, out=print, repeats: int = 1):
+def diagnose(model, logs: list[Path], settings: list[str], seeds: int, dev, out=print, repeats: int = 1,
+             games: list | None = None):
+    """Per-decision rows; `games`, if given, gets each game's guess of the
+    opponent's four against the ones that appeared."""
     parsed = [parse_setting(s) for s in settings]
     rows = []
     for log in logs:
         try:
-            rows += diagnose_log(model, log, parsed, seeds, dev, out, repeats)
+            rows += diagnose_log(model, log, parsed, seeds, dev, out, repeats, games)
         except Exception as e:  # one bad log shouldn't end the run
             out(f"{log.name}: skipped ({type(e).__name__}: {e})")
     return rows
 
 
-def diagnose_log(model, log: Path, parsed, seeds: int, dev, out, repeats: int) -> list[dict]:
+def diagnose_log(model, log: Path, parsed, seeds: int, dev, out, repeats: int, games=None) -> list[dict]:
     from selfplay.showdown.bot import Bot
     from selfplay.showdown.review import match_team
     from selfplay.showdown.team import complete_paste
@@ -189,6 +192,7 @@ def diagnose_log(model, log: Path, parsed, seeds: int, dev, out, repeats: int) -
     t = Tracker(team, our_name=side.get("name"))
     bot = Bot(model, team, None, seed=0)
     out(f"== {log.name} ({path.stem})")
+    guess = None  # the opponent's four the bot assumed at its first move
     k = 0
     while k < len(lines):
         line = lines[k]
@@ -208,6 +212,8 @@ def diagnose_log(model, log: Path, parsed, seeds: int, dev, out, repeats: int) -
         if req.get("forceSwitch"):
             continue  # the opponent doesn't act on a replacement
         position = t.position(bot.guess_brought)
+        if guess is None:
+            guess = set(bot.guess_brought(t)[:4])
         ps = json.dumps(position)
         env = SelfPlayEnv(1, seed=0, threads=1)
         env._env.set_position(0, ps, 1)
@@ -258,10 +264,24 @@ def diagnose_log(model, log: Path, parsed, seeds: int, dev, out, repeats: int) -
                         f"reply considered {seen:.0%}, weight {weight:.2f}; plays {plays}")
         out("\n".join(desc))
         rows.append(row)
+    if guess is not None:
+        seen = {m.uid for m in t.foe.mons if m.revealed}
+        names = {m.uid: m.species for m in t.foe.mons}
+        wrong = sorted(names[u] for u in seen - guess)
+        out(f"   the opponent's four as guessed at its first decision: {', '.join(sorted(names[u] for u in guess))}"
+            + (f"; it brought {', '.join(wrong)} instead" if wrong else "; no Pokemon it didn't expect appeared"))
+        if games is not None:
+            games.append({"log": log.name, "all_seen": len(seen) == 4, "wrong": len(wrong)})
     return rows
 
 
-def summary(rows: list[dict], settings: list[str], out=print):
+def summary(rows: list[dict], settings: list[str], out=print, games: list | None = None):
+    if games:
+        full = [g for g in games if g["all_seen"]]
+        out(f"\nthe bot's guess of the opponent's four (at its first decision): a Pokemon it didn't expect "
+            f"appeared in {sum(g['wrong'] > 0 for g in games)} of {len(games)} games"
+            + (f"; right in {sum(g['wrong'] == 0 for g in full)} of the {len(full)} games where all four "
+               f"appeared" if full else ""))
     if not rows:
         out("no decisions with a readable reply")
         return
@@ -297,8 +317,9 @@ def main():
     logs = sorted({Path(f) for x in a.logs for f in (glob.glob(x) if glob.has_magic(x) else [x])})
     if not logs:
         raise SystemExit(f"no logs match {' '.join(a.logs)}")
-    rows = diagnose(model, logs, a.settings, a.seeds, torch.device(a.device), repeats=a.repeats)
-    summary(rows, a.settings)
+    games: list = []
+    rows = diagnose(model, logs, a.settings, a.seeds, torch.device(a.device), repeats=a.repeats, games=games)
+    summary(rows, a.settings, games=games)
 
 
 if __name__ == "__main__":
