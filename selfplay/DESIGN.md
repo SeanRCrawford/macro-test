@@ -1284,6 +1284,34 @@ stays. What would move the result: a picture of the opponent fitted to
 how mikumiku37 actually plays (its moves from many games: RotomDotExe's
 route), and better values.
 
+**119 games** (ppo7, the search at 2,000): mikumiku37 26-39 on Showdown;
+on VGC Arena's open team sheets ladder rokusho_version 7-17, the other
+bots 21-9. Over 627 decisions against mikumiku37 (`diagnose`): its reply
+the 4th most likely in the bot's prediction (median), in the top 4 56%
+of the time, outside the top 24 11%; regret against the reply 0.233 with
+the search, 0.251 with the policy alone.
+
+- **The guess of the opponent's four** (from the bot's preview policy,
+  given the leads) missed one the opponent brought in 56 of 114 games (33
+  of 63 against mikumiku37, 1 of 22 against rokusho_version); 18% of the
+  bot's decisions were made under a wrong guess. But on those 99 decisions
+  against mikumiku37, deciding with the true four instead scores about
+  the same against the actual reply (regret 0.314 against 0.330): the
+  wrong guess costs little. Searching over several guesses isn't worth it.
+- **The win estimates are calibrated** against mikumiku37: decisions
+  estimated 40-60% came from games won 40% of the time, 60-80% 57%,
+  80-100% 92%; at the first move 49% on average against 41% won. Against
+  the weaker arena bots they are too pessimistic.
+- **Search-labelled values** (2 hours, 7,505 games, ppo7 frozen as the
+  policy): 0.491 +-0.049 against ppo7's own values, and ~50 games a minute
+  against PPO's ~13,000. Shelved.
+
+So no one fault: mikumiku37 chooses better, in ways self-play doesn't
+predict. The lever left is strong bots' actual play: VGC Arena publishes
+every finished battle (`/api/battles`, logs as a spectator saw them),
+from which the bot's prediction of the opponent, and perhaps its policy,
+could learn.
+
 **Search budget.** 6,000 against 2,000 (both ppo5, both searching, 404
 games): 0.520 +-0.049, though the larger side looked at 8,220 leaves a
 root against 2,852. Past 2,000 the search gains little with these
