@@ -20,6 +20,7 @@ import numpy as np
 import torch
 
 from selfplay.env import DECISION_PREVIEW, DECISION_SLOTS, SelfPlayEnv
+from selfplay.mcts import lookahead_of
 from selfplay.showdown.tracker import Tracker, parse_condition
 from selfplay.train import to_tensors
 
@@ -120,7 +121,8 @@ class Bot:
             ranked.insert(0, a)
             tied = a != mix[0][0]
             info = (f"win {100 * (r['value'] + 1) / 2:.0f}% (search, {r['leaf_evals']} evals, "
-                    f"{time.perf_counter() - start:.1f}s; network alone {100 * (value[0] + 1) / 2:.0f}%); "
+                    f"{time.perf_counter() - start:.1f}s, looked {lookahead_of(r, a):.1f} turns past this one; "
+                    f"network alone {100 * (value[0] + 1) / 2:.0f}%); "
                     + "; ".join(f"{100 * w:.0f}% {choice_text(legal[c], t, names)}" for c, w in mix[:3]
                                 if w >= 0.01 and c in legal)
                     + (f" [as good against the likely play, and better against the rest: "

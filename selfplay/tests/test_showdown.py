@@ -396,6 +396,10 @@ def test_diagnose_reads_the_opponents_reply_from_the_log():
     lines[1] = "|switch|p2a: Charizard|Charizard, L50, M|100/100"
     assert observed_reply(lines, "p2", position, data())[0] == ["?unseen"]
     assert observed_reply(["|t:|1", "|upkeep"], "p2", position, data()) is None
+    # The bot's own action, read the same way from its side of the position.
+    lines[1] = "|switch|p2a: Garchomp|Garchomp, L50, F|100/100"
+    ours = {"sides": [position["sides"][1], {"pokemon": []}]}
+    assert observed_reply(lines, "p2", ours, data(), side=0) == [["switch 4"], ["move 1 1 mega", "move 1 mega"]]
 
 
 def test_arena_client_logs_in_with_the_token_reconnects_and_skips_random_teams(tmp_path):

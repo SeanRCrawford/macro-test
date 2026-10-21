@@ -55,7 +55,7 @@ import torch
 
 def main():
     from selfplay.evaluate import load
-    from selfplay.mcts import TreeConfig
+    from selfplay.mcts import TreeConfig, with_settings
     from selfplay.showdown.bot import Bot
     from selfplay.showdown.client import ARENA_FORMAT, ARENA_SERVER, FORMAT, MAIN_SERVER, Client
 
@@ -78,6 +78,8 @@ def main():
     p.add_argument("--value-model", default=None,
                    help="the search values positions with this model.pt (e.g. from search_train)")
     p.add_argument("--budget", type=int, default=2000, help="search: value evaluations per turn")
+    p.add_argument("--search", default="",
+                   help="other search settings, KEY=VALUE,... over TreeConfig (e.g. root_share=0.3)")
     p.add_argument("--max-seconds", type=float, default=20.0,
                    help="search: the longest a decision may take (less when the battle timer is short)")
     p.add_argument("--sample", action="store_true",
@@ -137,7 +139,7 @@ def main():
     torch.set_grad_enabled(False)
     model = load(a.model, a.device)
     value_model = load(a.value_model, a.device) if a.value_model else None
-    tree = None if a.policy else TreeConfig(budget=a.budget)
+    tree = None if a.policy else with_settings(TreeConfig(budget=a.budget), a.search)
     seeds = iter(range(a.seed, a.seed + 1_000_000))
 
     def make_bot():
