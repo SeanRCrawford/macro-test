@@ -64,13 +64,17 @@ class TreeConfig:
     # tie. 0: the mix's most likely action.
     tiebreak: float = 0.02
     max_seconds: float = 0.0    # stop a search after this long (0: only the budget)
+    # The root widens (its first turn, by double oracle) only until this
+    # share of the budget is spent; the rest looks further down its likely
+    # plays, the turns after them (1: the root may widen all along).
+    root_share: float = 1.0
 
     def engine_kwargs(self) -> dict:
         keys = ("root_candidates", "node_candidates", "max_candidates", "widen", "c_explore",
                 "chance_floor", "static_weight", "max_outcomes", "roll_bands", "solve_iters",
                 "max_depth", "sims_per_wave", "root_oracle", "oracle_eps", "root_greedy",
                 "oracle_pool", "endgame", "endgame_outcomes", "endgame_budget", "full_depth",
-                "max_wave_scale", "max_probes", "probe_outcomes")
+                "max_wave_scale", "max_probes", "probe_outcomes", "root_share")
         return {k: getattr(self, k) for k in keys}
 
 
@@ -240,6 +244,17 @@ def tiebreak(r: dict, side: int, eps: float, default: int) -> int:
     return int(near[np.argmax(broad[near])]) if len(near) else default
 
 
+def lookahead_of(r: dict, action: int) -> float:
+    """Turns beyond the first the search's value of `action` looks, over
+    the opponent's equilibrium play (nan if it wasn't a candidate)."""
+    c0, c1 = r.get("candidates", ([], []))
+    if action not in c0 or "lookahead" not in r:
+        return float("nan")
+    la = np.asarray(r["lookahead"]).reshape(len(c0), len(c1))
+    y = np.clip(np.asarray(r["col"], np.float64), 0, None)
+    return float(la[c0.index(action)] @ (y / max(y.sum(), 1e-9)))
+
+
 def add_alternatives(r: dict) -> None:
     """Each candidate's loss against the opponent's equilibrium mix (0 for
     the actions in the mix's support), best first."""
@@ -254,6 +269,18 @@ def add_alternatives(r: dict) -> None:
         sorted(((a, float(v - q)) for a, q in zip(r["candidates"][0], u0)), key=lambda t: t[1]),
         sorted(((b, float(q - v)) for b, q in zip(r["candidates"][1], u1)), key=lambda t: t[1]),
     )
+
+
+def with_settings(cfg: TreeConfig, text: str) -> TreeConfig:
+    """`cfg` with 'key=value,key=value' (TreeConfig fields) applied."""
+    kinds = {f.name for f in fields(TreeConfig)}
+    for kv in filter(None, text.split(",")):
+        k, v = (x.strip() for x in kv.split("="))
+        if k not in kinds:
+            raise ValueError(f"no search setting {k!r} (TreeConfig: {', '.join(sorted(kinds))})")
+        cur = getattr(cfg, k)
+        setattr(cfg, k, (v.lower() in ("1", "true", "yes")) if isinstance(cur, bool) else type(cur)(v))
+    return cfg
 
 
 def config_from(args, prefix: str = "tree_") -> TreeConfig:

@@ -405,7 +405,7 @@ impl VecEnv {
                         roll_bands=1, solve_iters=200, max_depth=8, sims_per_wave=4, root_oracle=false,
                         oracle_eps=0.005, root_greedy=false, oracle_pool=24, endgame=0,
                         endgame_outcomes=64, endgame_budget=4.0, full_depth=0, max_wave_scale=16,
-                        max_probes=64, probe_outcomes=8, seed=0))]
+                        max_probes=64, probe_outcomes=8, root_share=1.0, seed=0))]
     #[allow(clippy::too_many_arguments)]
     fn mcts(
         &self,
@@ -433,6 +433,7 @@ impl VecEnv {
         max_wave_scale: usize,
         max_probes: usize,
         probe_outcomes: usize,
+        root_share: f32,
         seed: u64,
     ) -> PyResult<MctsForest> {
         if let Some(&g) = games.iter().find(|&&g| g >= self.env.len()) {
@@ -462,6 +463,7 @@ impl VecEnv {
             max_wave_scale,
             max_probes,
             probe_outcomes,
+            root_share,
             seed,
         };
         let roots = games.iter().map(|&g| self.env.battle(g).clone()).collect();
@@ -769,8 +771,11 @@ impl MctsForest {
 
     /// Per root: candidates and priors (per side), matrix (rows: side 0),
     /// row and col (equilibrium mixes), value, gap, visits (per side),
-    /// nodes, cells, leaf_evals, max_depth, exact, and pv: the principal
-    /// line as ((side 0 action, side 1 action), value, outcome probability).
+    /// nodes, cells, leaf_evals, max_depth, exact, pv: the principal line as
+    /// ((side 0 action, side 1 action), value, outcome probability),
+    /// lookahead and static_share (per matrix cell: turns its value looks
+    /// beyond the first, and the share that is the value network's view one
+    /// turn later), and depth_nodes (searched nodes per depth).
     fn results(&self, py: Python<'_>) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
         self.forest
             .results()
@@ -798,6 +803,9 @@ impl MctsForest {
                     .map(|p| ((p.actions[0], p.actions[1]), p.value, p.outcome_prob))
                     .collect();
                 d.set_item("pv", pv)?;
+                d.set_item("lookahead", r.lookahead)?;
+                d.set_item("static_share", r.static_share)?;
+                d.set_item("depth_nodes", r.depth_nodes)?;
                 Ok(d.unbind())
             })
             .collect()

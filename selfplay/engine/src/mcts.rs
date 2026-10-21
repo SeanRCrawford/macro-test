@@ -117,6 +117,10 @@ pub struct MctsConfig {
     /// oracle). A probe that becomes a candidate, or that an endgame's proof
     /// needs, is redone with the node's full number.
     pub probe_outcomes: usize,
+    /// The root widens only until the tree has spent this share of its
+    /// budget; the rest goes below it, into the turns after its likely
+    /// plays (1: the root may widen all along).
+    pub root_share: f32,
     pub seed: u64,
 }
 
@@ -146,6 +150,7 @@ impl Default for MctsConfig {
             max_wave_scale: 16,
             max_probes: 64,
             probe_outcomes: 8,
+            root_share: 1.0,
             seed: 0,
         }
     }
@@ -327,6 +332,8 @@ struct SimTree {
     cells: Vec<Cell>,
     rng: Rng,
     leaf_evals: u64,
+    /// Leaf evaluations after which the root stops widening.
+    root_limit: u64,
     sims: u64,
     stalls: u32,
     done: bool,
@@ -351,6 +358,64 @@ impl SimTree {
         } else {
             c.static_v
         }
+    }
+
+    /// How much of a node's value comes from its own search (not its
+    /// static estimate): 1 once solved exactly.
+    fn searched_share(&self, ni: usize, cfg: &MctsConfig) -> f32 {
+        let n = &self.nodes[ni];
+        if !n.has_prior || n.solved.is_nan() || n.k[0] == 0 || n.k[1] == 0 {
+            0.0
+        } else if n.exact || n.static_v.is_nan() {
+            1.0
+        } else {
+            n.visits as f32 / (cfg.static_weight + n.visits as f32)
+        }
+    }
+
+    /// Turns a cell's value looks beyond its own: over its outcomes, and
+    /// below them over both sides' equilibrium play, how far the search
+    /// went (an outcome valued by the network alone adds 0, one searched a
+    /// turn deeper 1, and so on, in proportion to the searched share).
+    fn cell_lookahead(&self, ci: usize, cfg: &MctsConfig) -> f32 {
+        let (mut v, mut p) = (0.0f32, 0.0f32);
+        for c in &self.cells[ci].children {
+            p += c.prob;
+            if c.terminal.is_nan() && c.node != NONE {
+                let ni = c.node as usize;
+                let n = &self.nodes[ni];
+                let share = self.searched_share(ni, cfg);
+                if share > 0.0 {
+                    let mut below = 0.0;
+                    for i in 0..n.k[0] {
+                        for j in 0..n.k[1] {
+                            let w = n.strategy[0].get(i).copied().unwrap_or(0.0)
+                                * n.strategy[1].get(j).copied().unwrap_or(0.0);
+                            if w > 0.0 {
+                                below += w * self.cell_lookahead(n.cell(i, j) as usize, cfg);
+                            }
+                        }
+                    }
+                    v += c.prob * share * (1.0 + below);
+                }
+            }
+        }
+        if p > 0.0 { v / p } else { 0.0 }
+    }
+
+    /// The share of a cell's value that is the value network's estimate of
+    /// the position one turn later (its outcomes not searched further and
+    /// not the end of the game).
+    fn cell_static_share(&self, ci: usize, cfg: &MctsConfig) -> f32 {
+        let (mut v, mut p) = (0.0f32, 0.0f32);
+        for c in &self.cells[ci].children {
+            p += c.prob;
+            if c.terminal.is_nan() {
+                v += c.prob
+                    * if c.node == NONE { 1.0 } else { 1.0 - self.searched_share(c.node as usize, cfg) };
+            }
+        }
+        if p > 0.0 { v / p } else { 0.0 }
     }
 
     fn child_exact(&self, c: &Child) -> bool {
@@ -581,6 +646,7 @@ impl SimTree {
                     }
                 }
                 Widen::Full => {}
+                _ if ni == 0 && self.leaf_evals >= self.root_limit => {}
                 widen => {
                     // Progressive widening.
                     let n = &self.nodes[ni];
@@ -955,6 +1021,13 @@ pub struct RootResult {
     /// side 0's value there, and the probability of the most likely outcome
     /// that follows (the line continues through it while it is a node).
     pub pv: Vec<PvStep>,
+    /// Per matrix cell: turns its value looks beyond the first (searched
+    /// below its outcomes), and the share of its value that is the value
+    /// network's view one turn later.
+    pub lookahead: Vec<f32>,
+    pub static_share: Vec<f32>,
+    /// Searched nodes (solved matrices) at each depth (0: the root).
+    pub depth_nodes: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -1031,6 +1104,7 @@ impl Forest {
                     cells: Vec::new(),
                     rng: Rng::new(seeder.next_u64()),
                     leaf_evals: 0,
+                    root_limit: u64::MAX,
                     sims: 0,
                     stalls: 0,
                     done: none,
@@ -1084,6 +1158,7 @@ impl Forest {
             // Plan no more outcomes this wave than the tree has budget left
             // (each new cell counts as its cap, an upper bound).
             let left = t.budget(budget, cfg).saturating_sub(t.leaf_evals).max(1);
+            t.root_limit = (t.budget(budget, cfg) as f64 * cfg.root_share.clamp(0.0, 1.0) as f64) as u64;
             let mut planned = 0u64;
             for _ in 0..sims {
                 t.sims += 1;
@@ -1336,9 +1411,24 @@ impl Forest {
                 let r = &t.nodes[0];
                 let (k0, k1) = (r.k[0], r.k[1]);
                 let mut matrix = Vec::with_capacity(k0 * k1);
+                let mut lookahead = Vec::with_capacity(k0 * k1);
+                let mut static_share = Vec::with_capacity(k0 * k1);
                 for i in 0..k0 {
                     for j in 0..k1 {
-                        matrix.push(t.cells[r.cell(i, j) as usize].value);
+                        let c = r.cell(i, j) as usize;
+                        matrix.push(t.cells[c].value);
+                        lookahead.push(t.cell_lookahead(c, &self.cfg));
+                        static_share.push(t.cell_static_share(c, &self.cfg));
+                    }
+                }
+                let mut depth_nodes = Vec::new();
+                for n in &t.nodes {
+                    if n.has_prior && !n.solved.is_nan() {
+                        let d = n.depth as usize;
+                        if depth_nodes.len() <= d {
+                            depth_nodes.resize(d + 1, 0);
+                        }
+                        depth_nodes[d] += 1;
                     }
                 }
                 RootResult {
@@ -1357,6 +1447,9 @@ impl Forest {
                     endgame: r.widen == Widen::Full,
                     legal: [r.ranked[0].len(), r.ranked[1].len()],
                     pv: t.principal_line(),
+                    lookahead,
+                    static_share,
+                    depth_nodes,
                 }
             })
             .collect()

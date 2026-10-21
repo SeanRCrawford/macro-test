@@ -144,3 +144,28 @@ def test_tree_search_stops_at_its_time_limit():
     r = search.run(env, games)[0]
     assert time.perf_counter() - start < 6
     assert r["leaf_evals"] > 0 and abs(sum(r["row"]) - 1) < 1e-3
+
+
+def test_tree_search_reports_its_lookahead_and_root_share_deepens_it():
+    """Per root cell, the turns its value looks past its own and the share
+    the network values one turn later; stopping the root's widening at a
+    share of the budget puts the rest into the turns after its likely
+    plays."""
+    from selfplay.mcts import TreeConfig, TreeSearch
+    from selfplay.mcts import lookahead_of
+    torch.manual_seed(3)
+    net = PolicyNet(d=32, layers=1)
+    looks = {}
+    for share in (1.0, 0.3):
+        env = SelfPlayEnv(8, seed=21)
+        _, games = next(positions(env, 8, seed=5))
+        search = TreeSearch(net, TreeConfig(budget=1500, root_share=share, sample=False), seed=1)
+        total = []
+        for r in search.run(env, games):
+            cells = len(r["candidates"][0]) * len(r["candidates"][1])
+            assert len(r["lookahead"]) == len(r["static_share"]) == cells
+            assert all(0 <= x <= 1 + 1e-5 for x in r["static_share"])
+            assert r["depth_nodes"][0] == 1
+            total.append(lookahead_of(r, search.pick(r, 0)))
+        looks[share] = float(np.mean(total))
+    assert looks[0.3] > looks[1.0]

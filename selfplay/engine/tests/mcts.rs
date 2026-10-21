@@ -178,8 +178,55 @@ fn searches_ordinary_positions_soundly() {
             assert!(r.candidates[s].contains(&r.pv[0].actions[s]));
         }
         deep += (r.max_depth >= 2) as usize;
+        // The lookahead report: per cell, turns beyond the first and the
+        // share the network values one turn later.
+        assert_eq!(r.lookahead.len(), r.matrix.len());
+        assert_eq!(r.static_share.len(), r.matrix.len());
+        assert!(r.lookahead.iter().all(|&l| (0.0..=cfg.max_depth as f32).contains(&l)));
+        assert!(r.static_share.iter().all(|&x| (0.0..=1.0 + 1e-5).contains(&x)));
+        assert!(r.lookahead.iter().any(|&l| l > 0.0), "no cell looks past its turn");
+        assert_eq!(r.depth_nodes.first(), Some(&1));
+        assert_eq!(r.depth_nodes.len(), r.max_depth + 1);
     }
     assert!(deep * 2 >= battles.len(), "the search rarely looks past the next turn");
+}
+
+#[test]
+fn root_share_spends_the_rest_of_the_budget_further_ahead() {
+    // With the root's widening stopped at a share of the budget, the same
+    // budget goes into the turns after the likely plays: more positions a
+    // turn ahead searched, and the equilibrium's cells look further.
+    let battles = positions(8, 5, |b| {
+        b.turn >= 2 && (0..2).all(|s| b.sides[s].pokemon_left >= 3 && matches!(b.requests[s], SideRequest::Move(_)))
+    });
+    assert!(battles.len() >= 6);
+    let budget = 3000;
+    let lookahead = |root_share: f32| {
+        let cfg = MctsConfig { root_oracle: true, root_share, ..MctsConfig::default() };
+        let mut forest = Forest::new(battles.clone(), cfg, true, 4);
+        run(&mut forest, budget);
+        let (mut nodes, mut look, mut width) = (0usize, 0f32, 0usize);
+        for r in forest.results() {
+            nodes += r.depth_nodes.get(1).copied().unwrap_or(0);
+            let (k0, k1) = (r.candidates[0].len(), r.candidates[1].len());
+            width += k0 * k1;
+            for i in 0..k0 {
+                for j in 0..k1 {
+                    look += r.strategy[0][i] * r.strategy[1][j] * r.lookahead[i * k1 + j];
+                }
+            }
+        }
+        (nodes, look / battles.len() as f32, width)
+    };
+    let (all_nodes, all_look, all_width) = lookahead(1.0);
+    let (share_nodes, share_look, share_width) = lookahead(0.3);
+    eprintln!(
+        "root share 1: {all_nodes} nodes a turn ahead, lookahead {all_look:.2}, {all_width} root cells; \
+         0.3: {share_nodes}, {share_look:.2}, {share_width}"
+    );
+    assert!(share_nodes > all_nodes);
+    assert!(share_look > all_look);
+    assert!(share_width < all_width, "the root still widened");
 }
 
 #[test]
@@ -434,5 +481,7 @@ fn endgame_double_oracle_finds_the_full_matrix_equilibrium() {
         );
         assert!((r.value - want).abs() < 0.01, "search {} vs full matrix {}", r.value, want);
         assert!(r.cells < full);
+        // One turn deep: every cell rests on the outcomes' static values.
+        assert!(r.lookahead.iter().all(|&l| l == 0.0));
     }
 }
