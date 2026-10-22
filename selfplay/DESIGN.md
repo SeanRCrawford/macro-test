@@ -1394,6 +1394,51 @@ turns past the first on the lines both sides are likely to play, as wide
 as a plain 8,000. Which of these wins is for the deeper judge and the
 matches to say.
 
+**On the GPU** (the user's runs; the diagnosis over 564 decisions against
+mikumiku37 in 78 games, each answer judged deeper by a 2,000-evaluation
+search from the position the turn leaves):
+
+| setting | one turn: regret | deeper: regret | turns past the first | exposed | s a decision |
+|---|---|---|---|---|---|
+| played in the game | 0.243 | 0.263 | - | - | - |
+| policy alone | 0.254 | 0.262 | - | - | 0.00 |
+| default (2,000) | 0.228 | 0.248 | 0.37 | 0.009 | 0.59 |
+| 8,000 | 0.237 | 0.250 | 0.96 | 0.003 | 2.31 |
+| 16,000, root_share=0.5 | 0.227 | 0.246 | 1.26 | 0.007 | 4.12 |
+| 16,000, root_share=0.5, every legal reply | 0.227 | 0.242 | 1.09 | 0.011 | 3.01 |
+
+- The search beats the policy by 0.014 (deeper), and the settings past the
+  default differ by 0.006 at most: within the noise of 564 decisions.
+- Where the default's 24-action pool missed the reply, its regret was
+  0.290 against 0.205 where it considered it; checking every legal reply
+  closes that gap (0.215 where it didn't consider the reply, because then
+  the reply was checked and didn't gain), a 0.006 gain overall.
+- **Correction:** judged deeper, mikumiku37's reply was no better for it
+  than the replies the default search expected (-0.010; better in 29%,
+  worse in 31% of 511 decisions). The earlier +0.11 compared it with the
+  policy's single most likely reply on the one-turn view; the search's
+  picture of the opponent holds up.
+- **Hindsight both ways, the same one-turn view:** against what the bot
+  played, mikumiku37's reply left 0.185 on the table; against what
+  mikumiku37 played, the bot's move left 0.243 (0.228 with the default
+  search now). mikumiku37 chooses better by about 0.05 a decision.
+- **Not predictability:** the bot plays its mix's choice, not a sample.
+  Over 779 decisions with a logged mix, the move played did no worse
+  against the actual reply than the rest of its mix (mikumiku37 -0.018
+  +-0.018, rokusho_version -0.035 +-0.023): no sign the opponents exploit
+  it.
+- **Self-play match:** 16,000 with root_share=0.5 against the default: 0.550
+  +-0.049 (95%) over 400 games, about +35 Elo (12.5 s a decision against
+  1.4 s, the GPU shared with training). Depth against width at 16,000:
+  0.535 after 170 games, undecided.
+
+So the search's shape is worth a little (16,000 and root_share=0.5 for real
+games, where the time is there), and the rest of the gap is the network's
+judgement: more training, and training the policy on the search's
+choices. The matches shared the GPU with training: the run got 1.9M games
+in 20 hours (20 a second against 228; VRAM full, so Windows spilled it to
+system memory). One GPU job at a time.
+
 So the search's shape, not the value network, is the first thing to fix:
 it should look past the next turn on the lines that matter. Training on
 mikumiku37's games isn't the way (a few hundred decisions, from a network
@@ -1527,9 +1572,17 @@ members are weak to, seven that exactly 2 are, four where the weak members
 outnumber the resisting by one, none where they do by two or more; at most
 two Mega Stones. Immunity abilities count; a Mega Stone holder counts as
 its Mega. The sand team breaks the first (Fire hits Excadrill, Gholdengo
-and Rillaboom; Ground hits Tyranitar, Excadrill and Gholdengo), so from a
-team that breaks the rules a variant must break fewer, and the search
-walks into them.
+and Rillaboom; Ground hits Tyranitar, Excadrill and Gholdengo).
+
+The first version let a team that breaks the rules change only toward
+them (a variant had to break fewer). From the sand team that left 86
+variants, 83 of them Gholdengo swapped out (mostly for Indeedee,
+Farigiraf, Oranguru) and 3 Rillaboom: no move, item or spread was ever
+tried, and the user's 2-hour run kept the team. That says only that
+Gholdengo beats those swaps in the bot's hands. Now a variant may break
+as many rules but no more, and each rule broken costs 0.02 of score
+(`--rule-penalty`): from the sand team, 300 variants are 162 set changes
+and 138 swaps, 11 of them within every rule.
 
 **What the evaluation can't see.** The bot plays both sides, so a team is
 rated as the bot plays it: one it hasn't practised (most variants) may

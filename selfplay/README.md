@@ -141,7 +141,8 @@ score blends the mean win rate with the worst quarter of matchups
 (`--tail`, `--alpha`). Type rules (`--no-rules` to drop them): at most one
 type 3+ members are weak to, seven types exactly 2 are weak to, four types
 where the weak outnumber the resisting by one, none where they do by two,
-and two Mega Stones; a start that breaks them may only change toward them.
+and two Mega Stones; from a start that breaks them a variant may break no
+more, and each rule broken costs `--rule-penalty` (0.02) of score.
 Each step prints the change tried and whether it was kept; at the end the
 team and the start play the field again on fresh games, and
 runs/build/.../report.txt has the team's paste, every matchup with the

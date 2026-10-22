@@ -33,11 +33,16 @@ def test_variants_keep_the_core_and_walk_into_the_rules(pool):
     team = load_start(SEED)
     rng = np.random.default_rng(0)
     keep = {"tyranitar", "excadrill"}
-    for t in neighbours(team, pool, rng, 12, keep, rules=True):
+    kinds = set()
+    for t in neighbours(team, pool, rng, 60, keep, rules=True):
         assert keep <= {to_id(m.species) for m in t}
         assert legal(t, pool)
-        assert not rule_breaks(t, pool)  # the seed breaks one rule; a variant must break fewer
-        assert sum(a != b for a, b in zip(team, t)) == 1
+        assert len(rule_breaks(t, pool)) <= 1  # the seed breaks one rule; a variant may not break more
+        changed = [a.species == b.species for a, b in zip(team, t) if a != b]
+        assert len(changed) == 1
+        kinds.add("set" if changed[0] else "swap")
+    # Not only swaps that fix the rules: the sets can change too.
+    assert kinds == {"set", "swap"}
     free = neighbours(team, pool, rng, 30, keep, rules=False)
     assert len(free) == 30 and len({t for t in free}) == 30
 

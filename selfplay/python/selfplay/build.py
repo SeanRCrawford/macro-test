@@ -41,8 +41,9 @@ stone counts as the Mega):
 - at most two Mega Stones.
 
 A team that breaks them (the starting one, say) may still be changed:
-then a variant is allowed if it breaks fewer, so the search walks into
-them.
+then a variant may break as many but no more, and every rule broken costs
+`--rule-penalty` of score, so a variant that complies wins a near tie and
+one that breaks fewer gets that much head start.
 
 The games are the bot playing both sides, so a team is rated as the bot
 plays it: a new team the network hasn't practised may rate low until it
@@ -373,7 +374,8 @@ def mutate(team: Team, pool: Pool, rng: np.random.Generator, keep: set[str]) -> 
 def neighbours(team: Team, pool: Pool, rng: np.random.Generator, n: int, keep: set[str], rules: bool,
                tries: int = 40) -> list[Team]:
     """Up to `n` distinct legal one-change variants within the rules (or,
-    if `team` breaks them, breaking fewer)."""
+    if `team` breaks them, breaking no more: its sets can still improve,
+    and the score's penalty per rule broken favours the ones that comply)."""
     allowed = len(rule_breaks(team, pool, rules))
     seen, out = {team}, []
     for _ in range(n * tries):
@@ -384,7 +386,7 @@ def neighbours(team: Team, pool: Pool, rng: np.random.Generator, n: int, keep: s
             continue
         seen.add(t)
         b = len(rule_breaks(t, pool, rules))
-        if (b == 0 or b < allowed) and legal(t, pool):
+        if b <= allowed and legal(t, pool):
             out.append(t)
     return out
 
@@ -531,12 +533,13 @@ def play(model, env: SelfPlayEnv, pairs: list[tuple[int, int]], amp: bool, out=p
 
 
 def race(model, arena: Arena, cands: list[int], field: list[int], w: np.ndarray, rounds: list[int],
-         keep: float, tail: float, alpha: float, amp: bool, rng, out=print):
+         keep: float, tail: float, alpha: float, amp: bool, rng, out=print, penalty=None):
     """Successive halving: every live candidate plays each field team
     rounds[r] games a side; after each round but the last the better half
     (by score; the first candidate, the current team, always stays) goes
-    on. Returns per candidate the score sums and game counts [field], and
-    the games themselves."""
+    on; `penalty` (per candidate) comes off its score. Returns per candidate
+    the score sums and game counts [field], and the games themselves."""
+    penalty = np.zeros(len(cands)) if penalty is None else np.asarray(penalty, np.float64)
     sums = np.zeros((len(cands), len(field)))
     counts = np.zeros((len(cands), len(field)))
     games = []
@@ -562,7 +565,7 @@ def race(model, arena: Arena, cands: list[int], field: list[int], w: np.ndarray,
             games.append((i, j, sc, pick))
         if r < len(rounds) - 1 and len(alive) > 2:
             score, _, _ = objective(sums[alive] / np.maximum(counts[alive], 1), w, tail, alpha)
-            ranked = [alive[k] for k in np.argsort(-score)]
+            ranked = [alive[k] for k in np.argsort(-(score - penalty[alive]))]
             n_keep = max(2, math.ceil(len(alive) * keep))
             alive = [0] + [i for i in ranked if i != 0][:n_keep - 1]
     return sums, counts, games, alive
@@ -643,6 +646,8 @@ def main():
     p.add_argument("--accept-se", type=float, default=1.0,
                    help="a challenger must beat the current team by this many standard errors")
     p.add_argument("--no-rules", action="store_true", help="no type rules or Mega limit")
+    p.add_argument("--rule-penalty", type=float, default=0.02,
+                   help="score taken off per rule a team breaks (a start that breaks them may keep doing so)")
     p.add_argument("--final-games", type=int, default=64, help="games a side per field team for the report")
     p.add_argument("--envs", type=int, default=2048)
     p.add_argument("--out", default="runs/build")
@@ -675,7 +680,8 @@ def main():
     print(f"field: {len(field)} teams; start:\n{team_paste(team)}")
     breaks = rule_breaks(team, pool, rules)
     if breaks:
-        print("the start breaks the rules: " + "; ".join(breaks) + " (variants must break fewer)")
+        print("the start breaks the rules: " + "; ".join(breaks)
+              + f" (variants may break no more; each rule broken costs {a.rule_penalty} of score)")
     t0 = time.time()
     (out / "start.txt").write_text(team_paste(team), encoding="utf-8")
     for step in range(1, a.steps + 1):
@@ -692,16 +698,20 @@ def main():
                 raise SystemExit(f"the engine rejects the current team: {arena.env.rejected()[:3]}")
             est = preview_matrix(model, arena, [arena.index[i] for i in ok], field, amp)
             sc, _, _ = objective(est, w, a.tail, a.alpha)
+            pen = {i: a.rule_penalty * len(rule_breaks(([team] + cands)[i], pool, rules)) for i in ok}
+            sc = sc - np.array([pen[i] for i in ok])
             ranked = [ok[k] for k in np.argsort(-sc) if ok[k] != 0][:a.race]
             racers = [0] + ranked
             est_of = {ok[k]: sc[k] for k in range(len(ok))}
             sums, counts, games, alive = race(model, arena, [arena.index[i] for i in racers], field, w, rounds,
                                               a.keep_share, a.tail, a.alpha, amp, rng,
-                                              out=lambda s: print(s, flush=True))
+                                              out=lambda s: print(s, flush=True),
+                                              penalty=[pen[i] for i in racers])
         finally:
             arena.close()
         pr = sums / np.maximum(counts, 1)
         score, mean, worst = objective(pr, w, a.tail, a.alpha)
+        score = score - np.array([pen[i] for i in racers])  # the rules broken, priced
         final = [i for i in alive]
         best = max((i for i in final if i != 0), key=lambda i: score[i], default=None)
         se = score_se(pr[0], counts[0], w)
@@ -719,12 +729,18 @@ def main():
             (out / "best.txt").write_text(team_paste(team), encoding="utf-8")
         what = changes(old, cands[racers[best] - 1]) if best is not None else "-"
         print(f"step {step}: current {score[0]:.3f} (mean {mean[0]:.3f}, worst {worst[0]:.3f}); best challenger "
-              f"{score[best] if best is not None else float('nan'):.3f} (+{gain:.3f}, se {se_b:.3f}): {what} -> "
+              f"{score[best] if best is not None else float('nan'):.3f} ({gain:+.3f}, se {se_b:.3f}): {what} -> "
               f"{'accepted' if accepted else 'kept'}; {len(cands)} variants, estimate vs games r={corr:.2f}; "
               f"{(time.time() - t0) / 60:.0f} min", flush=True)
+        # Every finalist, for judging how clear the step was.
+        tried = sorted(((float(score[k] - score[0]), changes(old, cands[racers[k] - 1]), int(counts[k].sum()))
+                        for k in final if k != 0), reverse=True)
+        for g_, what_, n_ in tried[1:4]:
+            print(f"    also: {g_:+.3f} ({n_} games) {what_}")
         log.write(json.dumps({"step": step, "score": float(score[0]), "mean": float(mean[0]), "worst": float(worst[0]),
                               "challenger": float(score[best]) if best is not None else None, "change": what,
                               "accepted": bool(accepted), "variants": len(cands), "estimate_corr": corr,
+                              "rules_broken": len(rule_breaks(team, pool, rules)), "finalists": tried,
                               "minutes": (time.time() - t0) / 60}) + "\n")
         log.flush()
     # Final: the team and the start against the field, on fresh games (the
