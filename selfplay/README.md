@@ -137,12 +137,14 @@ matchups. The CSV has every matchup.
 
 Searches for a team that does well against the placed teams (`--vs`,
 `--top 8`): from `--start`, or from a team built around `--keep` by who
-players pair with whom. Each step makes a few hundred one-change variants
-(a Pokemon, move, item, ability, spread or Mega swapped, drawn from Reg
-M-C usage; `--keep` Pokemon stay), screens them by the network's win
-estimate at team preview against every field team, and races the best
-dozen and the current team in games, keeping the better half each round;
-a challenger that wins by a standard error replaces the current team. The
+players pair with whom. Each step makes a few hundred variants, one or two
+changes away (a Pokemon, move, item, ability, spread or Mega swapped,
+drawn from Reg M-C usage, or two members swapped for a pair; `--keep`
+Pokemon stay), screens them by the network's win estimate at team preview
+against every field team, races a dozen and the current team in games,
+keeping the better half each round, and replays the race's winner against
+the current team on fresh games: it replaces the current team only if it
+wins those by two standard errors (`--confirm`, `--accept-se`). The
 score blends the mean win rate with the worst quarter of matchups
 (`--tail`, `--alpha`). Type rules (`--no-rules` to drop them): no type 4+
 members are weak to and at most one that 3 are, seven types exactly 2 are

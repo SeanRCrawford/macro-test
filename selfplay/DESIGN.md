@@ -1594,6 +1594,31 @@ break them further. Each step past a rule costs 0.02 of score
 (`--rule-penalty`). From the sand team, 300 variants are 216 set changes
 and 84 swaps, 21 of them within every rule, none with a type hitting four.
 
+**The first long run (ppo10, 153 steps in 2 hours, from the sand team)
+found nothing and drifted.** 56 changes were accepted, nearly all stat
+point shuffles flipping back and forth (Salamence Timid 2/0/0/32/0/32 to
+1/0/1/32/0/32 and back about twenty times, each "winning" by 0.01-0.025);
+on fresh games the end team scored 0.018 +-0.007 below the start. Each
+step raced about eleven challengers and accepted the best if it led by one
+standard error: the luckiest of eleven clears that bar most of the time.
+And among the racers the preview estimate ranked them backwards (median
+correlation -0.52 over the steps): picking its top eleven of 300 close
+variants picks the ones it overrates most. Now:
+
+- the race's winner and the current team play the field again on fresh
+  games, and the winner must lead those by two standard errors (of the
+  blended score, its worst-matchup part included);
+- a spread change must move 8+ points or the nature; a variant that only
+  reorders moves isn't one;
+- half the racers are the estimate's best, half drawn from its better
+  half;
+- variants may change two things at once (the user's suggestion): two
+  members swapped for a pair players run together with the rest, or two
+  single changes, so a limit one change can't get past (a type rule, a
+  synergy needing two new members) is within reach. From the sand team,
+  300 variants: 184 one set change, 56 one swap, 37 two set changes, 15
+  two swaps, 8 a swap and a set change.
+
 **What the evaluation can't see.** The bot plays both sides, so a team is
 rated as the bot plays it: one it hasn't practised (most variants) may
 rate low until it has. Finalists belong in data/my_teams for a stretch of

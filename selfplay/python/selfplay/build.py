@@ -7,23 +7,29 @@ step at a time.
 
 Each step:
 
-1. **Neighbours.** Many variants of the current team, each one change
-   away: a Pokemon swapped for another (drawn by how often Reg M-C players
-   pair it with the rest of the team, from the usage stats), or one move,
-   item, ability, spread or Mega Evolution changed (from what players run
-   on that Pokemon). Only legal teams the engine can play, without
-   removing a `--keep` Pokemon, and within the type rules (below).
+1. **Neighbours.** Many variants of the current team: one change (a
+   Pokemon swapped for another species, drawn by how often Reg M-C players
+   pair it with the rest of the team, from the usage stats; one move,
+   item, ability or spread, from what players run on it, a spread only if
+   it moves 8+ points or the nature; the Mega Stone on or off; a set
+   redrawn), or two at once: two members swapped for a pair players run
+   together with the rest, or two single changes. Only legal teams the
+   engine can play, without removing a `--keep` Pokemon, and within the
+   type rules (below).
 2. **Screening.** The network's own win estimate at team preview, the
    team against every field team (both sides): one evaluation per
    matchup, so hundreds of variants take seconds. On corpus teams it
-   tracks the games' results closely (correlation 0.74 per matchup, 0.91
-   per team averaged over 12 opponents; DESIGN.md).
-3. **Racing.** The best few by the estimate, and the current team, play
-   the field (the policy on both sides, as in `selfplay.teams`) in rounds
-   of more and more games; each round keeps the better half (successive
-   halving), so games go to the teams that might be best.
-4. **Accepting.** The best challenger replaces the current team if it
-   beats it by more than `--accept-se` standard errors.
+   tracks the games' results (correlation 0.74 per matchup, 0.91 per team
+   over 12 opponents), but among close variants its top picks are the
+   ones it overrates: half the racers are its best, half drawn from its
+   better half.
+3. **Racing.** Those and the current team play the field (the policy on
+   both sides, as in `selfplay.teams`) in rounds of more and more games;
+   each round keeps the better half (successive halving).
+4. **Confirming.** The race's winner is the luckiest of a dozen, so it and
+   the current team play the field again on fresh games (`--confirm`), and
+   it replaces the current team only if it wins those by `--accept-se`
+   (2) standard errors.
 
 The score of a team is its mean win chance against the field (weighted by
 placement) blended with its worst matchups (`--tail` of the weight on the
@@ -118,7 +124,7 @@ def changes(old: Team, new: Team) -> str:
             gone = [x.species for x in old if to_id(x.species) not in {to_id(y.species) for y in new}]
             out.append(f"{'/'.join(gone)} -> {m.species}" + (f" @ {m.item}" if m.item else ""))
             continue
-        if o.moves != m.moves:
+        if set(o.moves) != set(m.moves):
             out.append(f"{m.species}: {', '.join(sorted(set(o.moves) - set(m.moves)))} -> "
                        f"{', '.join(sorted(set(m.moves) - set(o.moves)))}")
         if o.item != m.item:
@@ -357,29 +363,77 @@ def legal(team: Team, pool: Pool) -> bool:
 
 # --- Changes -------------------------------------------------------------------
 
-KINDS = ("swap", "move", "item", "spread", "ability", "mega")
-KIND_WEIGHTS = (0.35, 0.3, 0.12, 0.1, 0.05, 0.08)
+KINDS = ("swap", "pair", "two", "move", "item", "spread", "ability", "mega", "reroll")
+KIND_WEIGHTS = (0.25, 0.15, 0.10, 0.22, 0.10, 0.06, 0.04, 0.05, 0.03)
 
 
-def mutate(team: Team, pool: Pool, rng: np.random.Generator, keep: set[str]) -> Team | None:
-    """One change to the team, or None if the draw led nowhere."""
-    kind = KINDS[rng.choice(len(KINDS), p=KIND_WEIGHTS)]
+def canon(team: Team) -> tuple:
+    """A team as a set of sets (member and move order don't matter)."""
+    return tuple(sorted((to_id(m.species), to_id(m.item), to_id(m.ability), m.nature, m.points,
+                         tuple(sorted(to_id(x) for x in m.moves))) for m in team))
+
+
+def spread_differs(a: Member, nature: str, points) -> bool:
+    """A spread worth trying: another nature, or 8+ stat points moved (a
+    point or two can't show in any number of games the builder plays)."""
+    return nature != a.nature or sum(abs(x - y) for x, y in zip(points, a.points)) >= 8
+
+
+def mutate(team: Team, pool: Pool, rng: np.random.Generator, keep: set[str], kind: str | None = None) -> Team | None:
+    """A variant of the team, or None if the draw led nowhere. One change
+    (a member swapped for another species; one move, item, ability or
+    spread; with or without its Mega Stone; its whole set redrawn), or two
+    at once: "pair" swaps two members for two that players pair with each
+    other and the rest, "two" makes two single changes."""
+    kind = kind or KINDS[rng.choice(len(KINDS), p=KIND_WEIGHTS)]
+    if kind == "two":
+        singles = ("swap", "move", "item", "spread", "ability", "mega")
+        w = np.array([KIND_WEIGHTS[KINDS.index(k)] for k in singles])
+        first = mutate(team, pool, rng, keep, singles[rng.choice(len(singles), p=w / w.sum())])
+        return None if first is None else mutate(first, pool, rng, keep, singles[rng.choice(len(singles), p=w / w.sum())])
+    free = [j for j, x in enumerate(team) if to_id(x.species) not in keep]
+    if kind == "pair":
+        if len(free) < 2:
+            return None
+        i, j = sorted(int(x) for x in rng.choice(free, 2, replace=False))
+        rest = tuple(x for k, x in enumerate(team) if k not in (i, j))
+        gone = {pool.d.base_of(to_id(team[k].species)) for k in (i, j)}
+        new = []
+        for _ in range(2):
+            have = rest + tuple(new)
+            keys, w = pool.swap_weights(have)
+            fresh = np.array([pool.entries[k]["base"] not in gone for k in keys])
+            if not fresh.any():
+                return None
+            w = np.where(fresh, w, 0.0)
+            k = keys[rng.choice(len(keys), p=w / w.sum())]
+            m = pool.member(k, rng, {x.item for x in have if x.item})
+            if m is None:
+                return None
+            new.append(m)
+        out = list(team)
+        out[i], out[j] = new
+        return tuple(out)
     i = int(rng.integers(len(team)))
     m = team[i]
     key = pool.key_of(m)
     e = pool.entries.get(key)
     taken = {x.item for j, x in enumerate(team) if j != i and x.item}
     if kind == "swap":
-        free = [j for j, x in enumerate(team) if to_id(x.species) not in keep]
         if not free:
             return None
         i = int(rng.choice(free))
         rest = team[:i] + team[i + 1:]
         keys, w = pool.swap_weights(rest)
+        own = pool.d.base_of(to_id(team[i].species))
         k = keys[rng.choice(len(keys), p=w)]
+        if pool.entries[k]["base"] == own:
+            return None  # another species, not the same one redrawn
         new = pool.member(k, rng, {x.item for x in rest if x.item})
     elif e is None:
         return None
+    elif kind == "reroll":
+        new = pool.member(key, rng, taken)
     elif kind == "move":
         options = [n for n, _ in e["moves"] if n not in m.moves]
         if not options:
@@ -394,7 +448,7 @@ def mutate(team: Team, pool: Pool, rng: np.random.Generator, keep: set[str]) -> 
             return None
         new = replace(m, item=options[rng.choice(len(options), p=_probs([p for _, p in options]))][0])
     elif kind == "spread":
-        options = [(n, pts, p) for n, pts, p in e["spreads"] if (n, pts) != (m.nature, m.points)]
+        options = [(n, pts, p) for n, pts, p in e["spreads"] if spread_differs(m, n, pts)]
         if not options:
             return None
         n, pts, _ = options[rng.choice(len(options), p=_probs([p for *_, p in options]))]
@@ -412,8 +466,10 @@ def mutate(team: Team, pool: Pool, rng: np.random.Generator, keep: set[str]) -> 
         new = pool.member(other[int(rng.integers(len(other)))], rng, taken)
     if new is None:
         return None
-    out = team[:i] + (new,) + team[i + 1:]
-    return out if out != team else None
+    if (new.species, new.item, new.ability, set(new.moves)) == (m.species, m.item, m.ability, set(m.moves)) \
+            and not spread_differs(m, new.nature, new.points):
+        return None  # the same set, a point or two moved
+    return team[:i] + (new,) + team[i + 1:]
 
 
 def neighbours(team: Team, pool: Pool, rng: np.random.Generator, n: int, keep: set[str], rules: bool,
@@ -423,14 +479,14 @@ def neighbours(team: Team, pool: Pool, rng: np.random.Generator, n: int, keep: s
     own: its sets can still improve, and the score's penalty favours the
     variants that break less)."""
     limit = rule_excess(team, pool, rules)
-    seen, out = {team}, []
+    seen, out = {canon(team)}, []
     for _ in range(n * tries):
         if len(out) >= n:
             break
         t = mutate(team, pool, rng, keep)
-        if t is None or t in seen:
-            continue
-        seen.add(t)
+        if t is None or canon(t) in seen:
+            continue  # nothing new (a move order or a no-op isn't a change)
+        seen.add(canon(t))
         if within(rule_excess(t, pool, rules), limit) and legal(t, pool):
             out.append(t)
     return out
@@ -616,10 +672,25 @@ def race(model, arena: Arena, cands: list[int], field: list[int], w: np.ndarray,
     return sums, counts, games, alive
 
 
-def score_se(p: np.ndarray, n: np.ndarray, w: np.ndarray) -> float:
-    """Standard error of a weighted mean of win rates."""
+def score_weights(p: np.ndarray, w: np.ndarray, tail: float, alpha: float) -> np.ndarray:
+    """The weight of each field team in a row's score (the mean's, plus the
+    worst matchups'): score = weights @ p."""
     w = w / w.sum()
-    return float(math.sqrt(np.sum(w ** 2 * p * (1 - p) / np.maximum(n, 1))))
+    worst = np.zeros(len(p))
+    acc = 0.0
+    for j in np.argsort(p):
+        take = min(w[j], alpha - acc)
+        if take <= 0:
+            break
+        worst[j] = take
+        acc += take
+    return (1 - tail) * w + tail * worst / max(acc, 1e-12)
+
+
+def score_se(p: np.ndarray, n: np.ndarray, w: np.ndarray, tail: float = 0.0, alpha: float = 0.25) -> float:
+    """Standard error of a row's score (its worst matchups taken as given)."""
+    c = score_weights(p, w, tail, alpha)
+    return float(math.sqrt(np.sum(c ** 2 * p * (1 - p) / np.maximum(n, 1))))
 
 
 # --- Reports ------------------------------------------------------------------
@@ -688,8 +759,10 @@ def main():
     p.add_argument("--keep-share", type=float, default=0.5, help="share of the racers each round keeps")
     p.add_argument("--tail", type=float, default=0.3, help="weight of the worst matchups in the score")
     p.add_argument("--alpha", type=float, default=0.25, help="the worst matchups: this share of the field")
-    p.add_argument("--accept-se", type=float, default=1.0,
-                   help="a challenger must beat the current team by this many standard errors")
+    p.add_argument("--confirm", type=int, default=16,
+                   help="games a side per field team for the race winner and the current team, fresh")
+    p.add_argument("--accept-se", type=float, default=2.0,
+                   help="the winner must beat the current team on those games by this many standard errors")
     p.add_argument("--no-rules", action="store_true", help="no type rules or Mega limit")
     p.add_argument("--rule-penalty", type=float, default=0.02,
                    help="score taken off per rule a team breaks (a start that breaks them may keep doing so)")
@@ -746,36 +819,58 @@ def main():
             sc, _, _ = objective(est, w, a.tail, a.alpha)
             pen = {i: a.rule_penalty * rule_cost(([team] + cands)[i], pool, rules) for i in ok}
             sc = sc - np.array([pen[i] for i in ok])
-            ranked = [ok[k] for k in np.argsort(-sc) if ok[k] != 0][:a.race]
+            # Half the racers by the estimate, half drawn from its better
+            # half: among close variants its top picks are the ones it
+            # overrates most (on the sand team it ranked its racers
+            # backwards), so it mostly trims the clear losers.
+            order = [ok[k] for k in np.argsort(-sc) if ok[k] != 0]
+            n_top = math.ceil(a.race / 2)
+            ranked = order[:n_top]
+            rest = order[n_top:max(n_top, len(order) // 2)]
+            if rest and a.race > n_top:
+                pick = rng.choice(len(rest), min(len(rest), a.race - n_top), replace=False)
+                ranked += [rest[k] for k in sorted(pick)]
             racers = [0] + ranked
             est_of = {ok[k]: sc[k] for k in range(len(ok))}
+            pens = np.array([pen[i] for i in racers])
             sums, counts, games, alive = race(model, arena, [arena.index[i] for i in racers], field, w, rounds,
                                               a.keep_share, a.tail, a.alpha, amp, rng,
-                                              out=lambda s: print(s, flush=True),
-                                              penalty=[pen[i] for i in racers])
+                                              out=lambda s: print(s, flush=True), penalty=pens)
+            pr = sums / np.maximum(counts, 1)
+            score, mean, worst = objective(pr, w, a.tail, a.alpha)
+            score = score - pens  # the rules broken, priced
+            final = [i for i in alive]
+            best = max((i for i in final if i != 0), key=lambda i: score[i], default=None)
+            gain = score[best] - score[0] if best is not None else 0.0
+            confirm = None
+            if best is not None and gain > 0:
+                # The race's winner is the luckiest of a dozen: it replaces
+                # the current team only if it wins again on fresh games.
+                cs, cc, _, _ = race(model, arena, [arena.index[0], arena.index[racers[best]]], field, w,
+                                    [a.confirm], 1.0, a.tail, a.alpha, amp, rng,
+                                    out=lambda s: print(s, flush=True))
+                cp = cs / np.maximum(cc, 1)
+                csc, _, _ = objective(cp, w, a.tail, a.alpha)
+                csc = csc - pens[[0, best]]
+                cse = math.hypot(score_se(cp[0], cc[0], w, a.tail, a.alpha),
+                                 score_se(cp[1], cc[1], w, a.tail, a.alpha))
+                confirm = (float(csc[1] - csc[0]), cse)
         finally:
             arena.close()
-        pr = sums / np.maximum(counts, 1)
-        score, mean, worst = objective(pr, w, a.tail, a.alpha)
-        score = score - np.array([pen[i] for i in racers])  # the rules broken, priced
-        final = [i for i in alive]
-        best = max((i for i in final if i != 0), key=lambda i: score[i], default=None)
-        se = score_se(pr[0], counts[0], w)
-        gain = score[best] - score[0] if best is not None else 0.0
-        se_b = math.hypot(se, score_se(pr[best], counts[best], w)) if best is not None else se
         # How well the estimate ranked the racers (once all have games).
         raced = [k for k in range(len(racers)) if counts[k].sum()]
         corr = float(np.corrcoef([est_of[racers[k]] for k in raced], [score[k] for k in raced])[0, 1]) \
             if len(raced) > 2 else float("nan")
-        accepted = best is not None and gain > a.accept_se * se_b
+        accepted = confirm is not None and confirm[0] > a.accept_se * confirm[1]
         old = team
         if accepted:
             team = cands[racers[best] - 1]
             (out / f"step{step:03d}.txt").write_text(team_paste(team), encoding="utf-8")
             (out / "best.txt").write_text(team_paste(team), encoding="utf-8")
         what = changes(old, cands[racers[best] - 1]) if best is not None else "-"
+        again = f"; on fresh games {confirm[0]:+.3f} +-{confirm[1]:.3f}" if confirm else ""
         print(f"step {step}: current {score[0]:.3f} (mean {mean[0]:.3f}, worst {worst[0]:.3f}); best challenger "
-              f"{score[best] if best is not None else float('nan'):.3f} ({gain:+.3f}, se {se_b:.3f}): {what} -> "
+              f"{score[best] if best is not None else float('nan'):.3f} ({gain:+.3f} in the race{again}): {what} -> "
               f"{'accepted' if accepted else 'kept'}; {len(cands)} variants, estimate vs games r={corr:.2f}; "
               f"{(time.time() - t0) / 60:.0f} min", flush=True)
         # Every finalist, for judging how clear the step was.
@@ -785,6 +880,7 @@ def main():
             print(f"    also: {g_:+.3f} ({n_} games) {what_}")
         log.write(json.dumps({"step": step, "score": float(score[0]), "mean": float(mean[0]), "worst": float(worst[0]),
                               "challenger": float(score[best]) if best is not None else None, "change": what,
+                              "confirm": confirm,
                               "accepted": bool(accepted), "variants": len(cands), "estimate_corr": corr,
                               "rules_broken": rule_excess(team, pool, rules), "finalists": tried,
                               "minutes": (time.time() - t0) / 60}) + "\n")
@@ -804,7 +900,7 @@ def main():
     if len(finalists) > 1:
         pr = sums / np.maximum(counts, 1)
         score, mean, worst = objective(pr, w, a.tail, a.alpha)
-        se = math.hypot(score_se(pr[0], counts[0], w), score_se(pr[1], counts[1], w))
+        se = math.hypot(score_se(pr[0], counts[0], w, a.tail, a.alpha), score_se(pr[1], counts[1], w, a.tail, a.alpha))
         lines.insert(2, f"the start, on the same fresh games: score {score[1]:.3f} (mean {mean[1]:.3f}, worst "
                         f"{worst[1]:.3f}); the team is {score[0] - score[1]:+.3f} better (+-{se:.3f}), "
                         f"{mean[0] - mean[1]:+.3f} on the mean")

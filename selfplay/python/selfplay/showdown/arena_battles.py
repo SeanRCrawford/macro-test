@@ -75,25 +75,37 @@ def entries_of(reply) -> list[dict]:
     return []
 
 
+def side_name(v) -> str | None:
+    """A side's bot name: "name", {"name": ...} or {"bot": {"name": ...}}."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, dict):
+        if isinstance(v.get("bot"), dict):
+            return v["bot"].get("name")
+        return v.get("name")
+    return None
+
+
 def bots_of(entry: dict) -> list[str]:
-    """The two bots' names in an entry, whatever the fields are called."""
+    """The two bots' names in an entry (p1 first)."""
     for key in ("bots", "players"):
         v = entry.get(key)
         if isinstance(v, list):
-            return [x if isinstance(x, str) else str(x.get("name", x)) for x in v]
-    names = []
-    for key in ("p1", "p2", "bot1", "bot2", "player1", "player2"):
-        v = entry.get(key)
-        if isinstance(v, str):
-            names.append(v)
-        elif isinstance(v, dict) and "name" in v:
-            names.append(str(v["name"]))
-    return names
+            return [side_name(x) or str(x) for x in v]
+    return [n for n in (side_name(entry.get(k)) for k in ("p1", "p2")) if n]
 
 
 def winner_of(entry: dict) -> str | None:
+    """The winning bot's name ("winner" is "p1"/"p2" on the arena)."""
     w = entry.get("winner")
-    return w.get("name") if isinstance(w, dict) else w
+    if w in ("p1", "p2"):
+        return side_name(entry.get(w))
+    return side_name(w)
+
+
+def rating_after(entry: dict, side: str) -> float | None:
+    v = entry.get(side)
+    return v.get("ratingAfter") if isinstance(v, dict) else None
 
 
 def download(out: Path, api: Api, fmt: str | None = None, bot: str | None = None, most: int = 0,
@@ -147,16 +159,22 @@ def summary(out: Path, top: int = 25) -> list[str]:
     lines = [f"{len(entries)} battles in {out}"]
     for fmt, n in Counter(e.get("format", "?") for e in entries).most_common():
         lines.append(f"  {fmt}: {n}")
-    games, wins = Counter(), Counter()
-    for e in entries:
+    games, wins, rating = Counter(), Counter(), {}
+    for e in sorted(entries, key=lambda e: int(e["id"])):
         w = winner_of(e)
-        for b in bots_of(e):
+        for side, b in zip(("p1", "p2"), bots_of(e)):
             games[b] += 1
             wins[b] += b == w
+            r = rating_after(e, side)
+            if r is not None:
+                rating[b] = r  # the latest
     if games:
-        lines.append(f"bots by battles (of {len(games)}):")
-        for b, n in games.most_common(top):
-            lines.append(f"  {b:24s} {n:6d}  won {wins[b] / n:.0%}")
+        order = sorted(games, key=lambda b: (-(rating.get(b) or -1e9), -games[b]))[:top] if rating \
+            else [b for b, _ in games.most_common(top)]
+        lines.append(f"bots by {'rating' if rating else 'battles'} (of {len(games)}):")
+        for b in order:
+            r = f"  rating {rating[b]:.0f}" if b in rating else ""
+            lines.append(f"  {b:24s} {games[b]:6d} battles, won {wins[b] / games[b]:.0%}{r}")
     return lines
 
 

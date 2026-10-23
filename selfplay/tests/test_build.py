@@ -5,9 +5,9 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("selfplay._engine")
 
-from selfplay.build import (Arena, Member, Pool, from_core, from_paste, legal, load_start,  # noqa: E402
-                            neighbours, objective, play, preview_matrix, rule_breaks, rule_excess, team_paste,
-                            type_profile, within)
+from selfplay.build import (Arena, Member, Pool, canon, from_core, from_paste, legal, load_start,  # noqa: E402
+                            mutate, neighbours, objective, play, preview_matrix, rule_breaks, rule_excess,
+                            score_se, score_weights, team_paste, type_profile, within)
 from selfplay.env import DEFAULT_CORPUS  # noqa: E402
 from selfplay.model import PolicyNet  # noqa: E402
 from selfplay.showdown.data import to_id  # noqa: E402
@@ -62,10 +62,30 @@ def test_variants_keep_the_core_and_walk_into_the_rules(pool):
         assert within(rule_excess(t, pool), limit)
         assert max(w for w, _ in type_profile(t, pool).values()) <= 3
         changed = [a.species == b.species for a, b in zip(team, t) if a != b]
-        assert len(changed) == 1
-        kinds.add("set" if changed[0] else "swap")
-    # Not only swaps that fix the rules: the sets can change too.
-    assert kinds == {"set", "swap"}
+        assert 1 <= len(changed) <= 2
+        kinds.add(("set" if changed[0] else "swap") if len(changed) == 1 else "two")
+        for a, b in zip(team, t):
+            if (a.species, a.item, a.ability, set(a.moves)) == (b.species, b.item, b.ability, set(b.moves)) \
+                    and (a.nature, a.points) != (b.nature, b.points):
+                # No spread nudged by a point or two (on its own).
+                assert a.nature != b.nature or sum(abs(x - y) for x, y in zip(a.points, b.points)) >= 8
+    # Not only swaps that fix the rules: sets change too, and two at once.
+    assert kinds == {"set", "swap", "two"}
+
+
+def test_joint_changes_swap_two_members_and_no_op_variants_are_dropped(pool):
+    team = load_start(SEED)
+    rng = np.random.default_rng(4)
+    keep = {"tyranitar", "excadrill"}
+    pairs = [t for t in (mutate(team, pool, rng, keep, "pair") for _ in range(40)) if t is not None]
+    assert pairs
+    for t in pairs:
+        swapped = [b for a, b in zip(team, t) if a.species != b.species]
+        assert len(swapped) == 2 and {to_id(m.species) for m in t} >= keep
+        assert len({pool.d.base_of(to_id(m.species)) for m in t}) == 6
+    # The same team with its moves in another order is no variant.
+    shuffled = tuple(m.__class__(**{**m.__dict__, "moves": tuple(reversed(m.moves))}) for m in team)
+    assert canon(shuffled) == canon(team) and shuffled != team
     free = neighbours(team, pool, rng, 30, keep, rules=False)
     assert len(free) == 30 and len({t for t in free}) == 30
 
@@ -78,6 +98,15 @@ def test_a_team_from_the_core_is_legal_and_within_the_rules(pool):
     # Its variants stay within every rule.
     for t in neighbours(team, pool, np.random.default_rng(1), 100, {"tyranitar", "excadrill"}, rules=True):
         assert not rule_breaks(t, pool)
+
+
+def test_the_scores_error_counts_the_worst_matchups_weight():
+    p = np.array([0.2, 0.5, 0.8, 0.6])
+    w = np.ones(4)
+    c = score_weights(p, w, tail=0.5, alpha=0.25)
+    assert np.isclose(c.sum(), 1.0) and np.isclose(c[0], 0.5 * 0.25 + 0.5)
+    n = np.full(4, 100.0)
+    assert score_se(p, n, w, 0.5, 0.25) > score_se(p, n, w)  # the tail's one matchup is noisy
 
 
 def test_the_score_blends_the_mean_with_the_worst_matchups():

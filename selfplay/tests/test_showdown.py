@@ -567,8 +567,10 @@ def test_arena_battles_downloads_new_battles_once_and_waits_on_429(tmp_path):
     from urllib.parse import parse_qs, urlparse
 
     from selfplay.showdown.arena_battles import Api, download, summary
-    battles = [{"id": i, "format": "gen9championsvgc2026regmcots", "p1": "Scronk", "p2": "Rival",
-                "winner": "Scronk" if i % 2 else "Rival", "turns": 7} for i in range(1, 6)]
+    # As the arena lists them: the sides' bots, ratings, and the winner as "p1"/"p2".
+    battles = [{"id": i, "format": "gen9championsvgc2026regmcots", "winner": "p1" if i % 2 else "p2", "turns": 7,
+                "p1": {"bot": {"name": "Scronk"}, "ratingAfter": 1500 + i},
+                "p2": {"bot": {"name": "Rival"}, "ratingAfter": 1400 - i}} for i in range(1, 6)]
     hits = {"429": 0, "logs": 0}
 
     class Handler(BaseHTTPRequestHandler):
@@ -610,6 +612,7 @@ def test_arena_battles_downloads_new_battles_once_and_waits_on_429(tmp_path):
         battles.append(dict(battles[0], id=6))
         assert download(tmp_path, api, say=lambda *_: None) == 1 and hits["logs"] == 6
         text = "\n".join(summary(tmp_path))
-        assert "6 battles" in text and "Scronk" in text and "won 67%" in text  # 4 of 6
+        assert "6 battles in" in text and "won 67%" in text  # 4 of 6
+        assert text.index("Scronk") < text.index("Rival") and "rating 1501" in text  # the latest rating
     finally:
         server.shutdown()
