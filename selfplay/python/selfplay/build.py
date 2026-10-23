@@ -33,17 +33,20 @@ Type rules (`--no-rules` to turn off), counting by member against each
 attacking type (abilities that grant immunities count; a Mega with its
 stone counts as the Mega):
 
-- at most one type that 3 or more members are weak to;
+- no type that 4 or more members are weak to;
+- at most one type that 3 members are weak to;
 - at most seven types that exactly 2 members are weak to;
 - at most four types where the members weak to it outnumber those that
   resist it by one;
 - no type where they outnumber them by two or more;
 - at most two Mega Stones.
 
-A team that breaks them (the starting one, say) may still be changed:
-then a variant may break as many but no more, and every rule broken costs
-`--rule-penalty` of score, so a variant that complies wins a near tie and
-one that breaks fewer gets that much head start.
+A team within the rules stays within them. One that breaks some (the
+starting one, say) may still be changed, but no variant may break any rule
+further than it does, each rule on its own (a fourth member weak to a
+type is a step further, so is a second type with two more weak members
+than resisting); every step past a rule costs `--rule-penalty` of score,
+so a variant that breaks less wins a near tie.
 
 The games are the bot playing both sides, so a team is rated as the bot
 plays it: a new team the network hasn't practised may rate low until it
@@ -273,28 +276,70 @@ def d_typechart() -> dict:
     return _CHART
 
 
+RULES = ("4+ weak", "3+ weak types", "2 weak types", "net +1 types", "net +2", "megas")
+
+
+def rule_excess(team: Team, pool: Pool, rules: bool = True) -> dict[str, int]:
+    """How far the team goes past each rule (0: within it), by member:
+
+    - 4+ weak: members past 3 weak to one type, summed over types (no type
+      may hit four);
+    - 3+ weak types: types 3 or more members are weak to, past one;
+    - 2 weak types: types exactly 2 members are weak to, past seven;
+    - net +1 types: types with one more weak member than resisting, past four;
+    - net +2: past one more weak than resisting, summed over types (none may
+      have two more);
+    - megas: Mega Stones past two."""
+    if not rules:
+        return dict.fromkeys(RULES, 0)
+    prof = type_profile(team, pool)
+    weak = [w for w, _ in prof.values()]
+    net = [w - r for w, r in prof.values()]
+    megas = sum(pool.key_of(m) != to_id(m.species) for m in team)
+    return {
+        "4+ weak": sum(max(0, w - 3) for w in weak),
+        "3+ weak types": max(0, sum(w >= 3 for w in weak) - 1),
+        "2 weak types": max(0, sum(w == 2 for w in weak) - 7),
+        "net +1 types": max(0, sum(n == 1 for n in net) - 4),
+        "net +2": sum(max(0, n - 1) for n in net),
+        "megas": max(0, megas - 2),
+    }
+
+
+def within(excess: dict[str, int], limit: dict[str, int]) -> bool:
+    """No rule broken further than `limit` breaks it (a team within the
+    rules must stay within them)."""
+    return all(excess[k] <= limit[k] for k in RULES)
+
+
 def rule_breaks(team: Team, pool: Pool, rules: bool = True) -> list[str]:
-    """The type rules (and the two-Mega limit) the team breaks."""
+    """The rules the team breaks, in words."""
     if not rules:
         return []
     prof = type_profile(team, pool)
+    ex = rule_excess(team, pool, rules)
     out = []
-    three = [a for a, (w, _) in prof.items() if w >= 3]
-    if len(three) > 1:
-        out.append(f"{len(three)} types hit 3+ members ({', '.join(three)})")
-    two = [a for a, (w, _) in prof.items() if w == 2]
-    if len(two) > 7:
-        out.append(f"{len(two)} types hit exactly 2 members")
-    net1 = [a for a, (w, r) in prof.items() if w - r == 1]
-    if len(net1) > 4:
-        out.append(f"{len(net1)} types with one more weak member than resisting ({', '.join(net1)})")
+    if ex["4+ weak"]:
+        out.append("4+ members weak to " + ", ".join(a for a, (w, _) in prof.items() if w >= 4))
+    if ex["3+ weak types"]:
+        out.append(f"{ex['3+ weak types'] + 1} types hit 3+ members "
+                   f"({', '.join(a for a, (w, _) in prof.items() if w >= 3)})")
+    if ex["2 weak types"]:
+        out.append(f"{ex['2 weak types'] + 7} types hit exactly 2 members")
+    if ex["net +1 types"]:
+        out.append(f"{ex['net +1 types'] + 4} types with one more weak member than resisting "
+                   f"({', '.join(a for a, (w, r) in prof.items() if w - r == 1)})")
     for a, (w, r) in prof.items():
         if w - r >= 2:
             out.append(f"{a}: {w} weak, {r} resisting")
-    megas = sum(pool.key_of(m) != to_id(m.species) for m in team)
-    if megas > 2:
-        out.append(f"{megas} Mega Stones")
+    if ex["megas"]:
+        out.append(f"{ex['megas'] + 2} Mega Stones")
     return out
+
+
+def rule_cost(team: Team, pool: Pool, rules: bool = True) -> int:
+    """All the rules' excesses together (what the score's penalty counts)."""
+    return sum(rule_excess(team, pool, rules).values())
 
 
 def legal(team: Team, pool: Pool) -> bool:
@@ -373,10 +418,11 @@ def mutate(team: Team, pool: Pool, rng: np.random.Generator, keep: set[str]) -> 
 
 def neighbours(team: Team, pool: Pool, rng: np.random.Generator, n: int, keep: set[str], rules: bool,
                tries: int = 40) -> list[Team]:
-    """Up to `n` distinct legal one-change variants within the rules (or,
-    if `team` breaks them, breaking no more: its sets can still improve,
-    and the score's penalty per rule broken favours the ones that comply)."""
-    allowed = len(rule_breaks(team, pool, rules))
+    """Up to `n` distinct legal one-change variants within the rules, or, if
+    `team` breaks some, breaking none further than it does (each rule on its
+    own: its sets can still improve, and the score's penalty favours the
+    variants that break less)."""
+    limit = rule_excess(team, pool, rules)
     seen, out = {team}, []
     for _ in range(n * tries):
         if len(out) >= n:
@@ -385,8 +431,7 @@ def neighbours(team: Team, pool: Pool, rng: np.random.Generator, n: int, keep: s
         if t is None or t in seen:
             continue
         seen.add(t)
-        b = len(rule_breaks(t, pool, rules))
-        if b <= allowed and legal(t, pool):
+        if within(rule_excess(t, pool, rules), limit) and legal(t, pool):
             out.append(t)
     return out
 
@@ -413,7 +458,7 @@ def from_core(keep: list[str], pool: Pool, rng: np.random.Generator, rules: bool
             if m is None or megas(tuple(team) + (m,)) > 2:
                 continue
             # The most paired-with member that breaks the fewest rules.
-            breaks = len(rule_breaks(tuple(team) + (m,), pool, rules))
+            breaks = rule_cost(tuple(team) + (m,), pool, rules)
             if best is None or breaks < best[0]:
                 best = (breaks, m)
             if breaks == 0:
@@ -681,7 +726,8 @@ def main():
     breaks = rule_breaks(team, pool, rules)
     if breaks:
         print("the start breaks the rules: " + "; ".join(breaks)
-              + f" (variants may break no more; each rule broken costs {a.rule_penalty} of score)")
+              + f" (variants may break none of them further; each step past a rule costs "
+              f"{a.rule_penalty} of score)")
     t0 = time.time()
     (out / "start.txt").write_text(team_paste(team), encoding="utf-8")
     for step in range(1, a.steps + 1):
@@ -698,7 +744,7 @@ def main():
                 raise SystemExit(f"the engine rejects the current team: {arena.env.rejected()[:3]}")
             est = preview_matrix(model, arena, [arena.index[i] for i in ok], field, amp)
             sc, _, _ = objective(est, w, a.tail, a.alpha)
-            pen = {i: a.rule_penalty * len(rule_breaks(([team] + cands)[i], pool, rules)) for i in ok}
+            pen = {i: a.rule_penalty * rule_cost(([team] + cands)[i], pool, rules) for i in ok}
             sc = sc - np.array([pen[i] for i in ok])
             ranked = [ok[k] for k in np.argsort(-sc) if ok[k] != 0][:a.race]
             racers = [0] + ranked
@@ -740,7 +786,7 @@ def main():
         log.write(json.dumps({"step": step, "score": float(score[0]), "mean": float(mean[0]), "worst": float(worst[0]),
                               "challenger": float(score[best]) if best is not None else None, "change": what,
                               "accepted": bool(accepted), "variants": len(cands), "estimate_corr": corr,
-                              "rules_broken": len(rule_breaks(team, pool, rules)), "finalists": tried,
+                              "rules_broken": rule_excess(team, pool, rules), "finalists": tried,
                               "minutes": (time.time() - t0) / 60}) + "\n")
         log.flush()
     # Final: the team and the start against the field, on fresh games (the

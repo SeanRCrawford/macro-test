@@ -138,11 +138,12 @@ estimate at team preview against every field team, and races the best
 dozen and the current team in games, keeping the better half each round;
 a challenger that wins by a standard error replaces the current team. The
 score blends the mean win rate with the worst quarter of matchups
-(`--tail`, `--alpha`). Type rules (`--no-rules` to drop them): at most one
-type 3+ members are weak to, seven types exactly 2 are weak to, four types
-where the weak outnumber the resisting by one, none where they do by two,
-and two Mega Stones; from a start that breaks them a variant may break no
-more, and each rule broken costs `--rule-penalty` (0.02) of score.
+(`--tail`, `--alpha`). Type rules (`--no-rules` to drop them): no type 4+
+members are weak to and at most one that 3 are, seven types exactly 2 are
+weak to, four types where the weak outnumber the resisting by one, none
+where they do by two, and two Mega Stones. A team within them stays
+within them; from a start that breaks some, no variant breaks any of them
+further, and each step past a rule costs `--rule-penalty` (0.02) of score.
 Each step prints the change tried and whether it was kept; at the end the
 team and the start play the field again on fresh games, and
 runs/build/.../report.txt has the team's paste, every matchup with the

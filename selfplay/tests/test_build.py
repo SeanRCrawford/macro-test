@@ -5,8 +5,9 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("selfplay._engine")
 
-from selfplay.build import (Arena, Pool, from_core, from_paste, legal, load_start, neighbours,  # noqa: E402
-                            objective, play, preview_matrix, rule_breaks, team_paste, type_profile)
+from selfplay.build import (Arena, Member, Pool, from_core, from_paste, legal, load_start,  # noqa: E402
+                            neighbours, objective, play, preview_matrix, rule_breaks, rule_excess, team_paste,
+                            type_profile, within)
 from selfplay.env import DEFAULT_CORPUS  # noqa: E402
 from selfplay.model import PolicyNet  # noqa: E402
 from selfplay.showdown.data import to_id  # noqa: E402
@@ -26,7 +27,26 @@ def test_pastes_round_trip_and_the_seed_breaks_the_type_rules(pool):
     prof = type_profile(team, pool)
     assert prof["Fire"] == (3, 3) and prof["Ground"] == (3, 2)
     assert rule_breaks(team, pool) == ["2 types hit 3+ members (Fire, Ground)"]
+    assert rule_excess(team, pool) == {"4+ weak": 0, "3+ weak types": 1, "2 weak types": 0,
+                                       "net +1 types": 0, "net +2": 0, "megas": 0}
     assert rule_breaks(team, pool, rules=False) == []
+
+
+def test_a_fourth_weak_member_breaks_the_rules_further(pool):
+    """The sand team has three members weak to Fire and three to Ground;
+    Kingambit for Salamence makes four of each (and a third such type,
+    Fighting): rules broken further, so not allowed."""
+    team = load_start(SEED)
+    kingambit = Member("Kingambit", "Black Glasses", "Defiant", "Adamant", (2, 32, 0, 0, 0, 32),
+                       ("Kowtow Cleave", "Sucker Punch", "Iron Head", "Protect"))
+    worse = tuple(kingambit if m.species == "Salamence" else m for m in team)
+    prof = type_profile(worse, pool)
+    assert prof["Ground"][0] == 4 and prof["Fire"][0] == 4
+    assert rule_excess(worse, pool) == {"4+ weak": 2, "3+ weak types": 2, "2 weak types": 0,
+                                        "net +1 types": 0, "net +2": 4, "megas": 0}
+    assert "4+ members weak to Fire, Ground" in rule_breaks(worse, pool)
+    assert not within(rule_excess(worse, pool), rule_excess(team, pool))
+    assert within(rule_excess(team, pool), rule_excess(team, pool))
 
 
 def test_variants_keep_the_core_and_walk_into_the_rules(pool):
@@ -34,10 +54,13 @@ def test_variants_keep_the_core_and_walk_into_the_rules(pool):
     rng = np.random.default_rng(0)
     keep = {"tyranitar", "excadrill"}
     kinds = set()
-    for t in neighbours(team, pool, rng, 60, keep, rules=True):
+    limit = rule_excess(team, pool)
+    for t in neighbours(team, pool, rng, 300, keep, rules=True):
         assert keep <= {to_id(m.species) for m in t}
         assert legal(t, pool)
-        assert len(rule_breaks(t, pool)) <= 1  # the seed breaks one rule; a variant may not break more
+        # The seed breaks one rule: no variant breaks any rule further.
+        assert within(rule_excess(t, pool), limit)
+        assert max(w for w, _ in type_profile(t, pool).values()) <= 3
         changed = [a.species == b.species for a, b in zip(team, t) if a != b]
         assert len(changed) == 1
         kinds.add("set" if changed[0] else "swap")
@@ -52,6 +75,9 @@ def test_a_team_from_the_core_is_legal_and_within_the_rules(pool):
     names = [to_id(m.species) for m in team]
     assert names[:2] == ["tyranitar", "excadrill"] and len(set(names)) == 6
     assert legal(team, pool) and not rule_breaks(team, pool)
+    # Its variants stay within every rule.
+    for t in neighbours(team, pool, np.random.default_rng(1), 100, {"tyranitar", "excadrill"}, rules=True):
+        assert not rule_breaks(t, pool)
 
 
 def test_the_score_blends_the_mean_with_the_worst_matchups():

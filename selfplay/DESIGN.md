@@ -1568,9 +1568,9 @@ so the last word is a fresh evaluation of the final team and the start on
 the same new games.
 
 **The type rules** are the user's, by member: at most one type that 3+
-members are weak to, seven that exactly 2 are, four where the weak members
-outnumber the resisting by one, none where they do by two or more; at most
-two Mega Stones. Immunity abilities count; a Mega Stone holder counts as
+members are weak to (none that 4 are), seven that exactly 2 are, four
+where the weak members outnumber the resisting by one, none where they do
+by two or more; at most two Mega Stones. Immunity abilities count; a Mega Stone holder counts as
 its Mega. The sand team breaks the first (Fire hits Excadrill, Gholdengo
 and Rillaboom; Ground hits Tyranitar, Excadrill and Gholdengo).
 
@@ -1579,10 +1579,20 @@ them (a variant had to break fewer). From the sand team that left 86
 variants, 83 of them Gholdengo swapped out (mostly for Indeedee,
 Farigiraf, Oranguru) and 3 Rillaboom: no move, item or spread was ever
 tried, and the user's 2-hour run kept the team. That says only that
-Gholdengo beats those swaps in the bot's hands. Now a variant may break
-as many rules but no more, and each rule broken costs 0.02 of score
-(`--rule-penalty`): from the sand team, 300 variants are 162 set changes
-and 138 swaps, 11 of them within every rule.
+Gholdengo beats those swaps in the bot's hands.
+
+The second version counted broken rules: a variant could break as many
+as the current team. But "two types hit 3+ members" counted once whether a
+type hit three members or four, and a run produced a team with four
+members weak to one type. Now each rule has an excess (how far past it the
+team goes: members past three weak to a type, summed; types hitting 3+
+past one; types hitting exactly 2 past seven; types one weak member net
+past four; net weakness past one, summed; Mega Stones past two), and a
+variant may not exceed the current team's on any of them: a team within
+the rules stays within them, and one that breaks some may change but not
+break them further. Each step past a rule costs 0.02 of score
+(`--rule-penalty`). From the sand team, 300 variants are 216 set changes
+and 84 swaps, 21 of them within every rule, none with a type hitting four.
 
 **What the evaluation can't see.** The bot plays both sides, so a team is
 rated as the bot plays it: one it hasn't practised (most variants) may
