@@ -556,3 +556,60 @@ def test_diagnosis_filters_logs_by_who_played_them_and_when(tmp_path):
     assert filter_logs(logs, played_by="budget=2000") == []
     assert filter_logs(logs, after="2026-06-01") == [new]
     assert filter_logs(logs, after="2025-12-31 23:00") == logs
+
+
+def test_arena_battles_downloads_new_battles_once_and_waits_on_429(tmp_path):
+    """Against a stand-in for vgc.bot's API: every battle after the
+    highest id downloaded is listed oldest first and its log saved once; a
+    second run fetches only what is new; a 429 is waited out."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    from selfplay.showdown.arena_battles import Api, download, summary
+    battles = [{"id": i, "format": "gen9championsvgc2026regmcots", "p1": "Scronk", "p2": "Rival",
+                "winner": "Scronk" if i % 2 else "Rival", "turns": 7} for i in range(1, 6)]
+    hits = {"429": 0, "logs": 0}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            if u.path == "/api/battles":
+                q = parse_qs(u.query)
+                after, limit = int(q["after"][0]), int(q["limit"][0])
+                page = [b for b in battles if b["id"] > after][:min(limit, 2)]
+                body = json.dumps({"battles": page}).encode()
+            elif u.path.endswith("/log"):
+                if hits["429"] == 0:
+                    hits["429"] += 1
+                    self.send_response(429)
+                    self.send_header("Retry-After", "0")
+                    self.end_headers()
+                    return
+                hits["logs"] += 1
+                body = f"|init|battle\n|win|x{u.path.split('/')[3]}\n".encode()
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        api = Api(f"http://127.0.0.1:{server.server_port}", per_minute=60_000, out=lambda *_: None)
+        assert download(tmp_path, api, say=lambda *_: None) == 5
+        assert sorted(p.name for p in tmp_path.glob("*.log")) == [f"{i}.log" for i in range(1, 6)]
+        assert hits == {"429": 1, "logs": 5}
+        assert download(tmp_path, api, say=lambda *_: None) == 0
+        battles.append(dict(battles[0], id=6))
+        assert download(tmp_path, api, say=lambda *_: None) == 1 and hits["logs"] == 6
+        text = "\n".join(summary(tmp_path))
+        assert "6 battles" in text and "Scronk" in text and "won 67%" in text  # 4 of 6
+    finally:
+        server.shutdown()

@@ -268,6 +268,18 @@ then disconnects; a second Ctrl+C quits at once, which loses a battle in
 progress. The same works on Showdown. The arena gives 45 s a decision (90 s at
 team preview), well over the search's 20.
 
+### Download the arena's battles
+
+    python -m selfplay.showdown.arena_battles --out runs/arena
+    python -m selfplay.showdown.arena_battles --out runs/arena --format gen9championsvgc2026regmcots
+
+Every finished arena battle is public (free for analysis or training, no
+token). This saves each log once as runs/arena/<id>.log (as a spectator saw
+it: on the open team sheets ladder, both teams' sets), its entry in
+runs/arena/battles.jsonl, and fetches only new battles when run again,
+within the API's rate limit. It ends with the battles per format and the
+bots with the most battles and their win rates.
+
 ## Regenerate data from Showdown
 
 Showdown is the rules authority. Both scripts need a built checkout of
