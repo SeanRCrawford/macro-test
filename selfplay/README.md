@@ -64,6 +64,12 @@ See DESIGN.md 4.11 for the action and observation layouts.
 
 See DESIGN.md 4.13 for the model, the training setup and first results.
 
+To practise the team the bot plays on the ladder most, add `--focus "Big 6
+Chople"` (several: "A;B"): it plays in about `--focus-share` (0.25) of the
+games, against the whole corpus; with `--baseline`, each evaluation also
+plays it (this model) against the placed teams (the baseline), logged as
+vs_baseline_focus and summarised by `selfplay.summary`.
+
 ## Search
 
     python -m selfplay.search runs/tiny/model.pt --games 400 --k 8   # one-turn search vs the raw policy
@@ -212,7 +218,10 @@ was (the most a reply it checked but left out would gain). Search settings are
 `key=value` over the tree search's options; the client takes them as
 `--search`, e.g. `--budget 16000 --search root_share=0.5`. Each decision
 line also says how far the search looked ("looked 0.3 turns past this
-one").
+one"), and each saved log starts with the model and settings that played it
+("|bot|played by runs/ppo10/model.pt budget=16000 ..."): `--played-by ppo10`
+diagnoses only those games, `--after 2026-10-23` only the logs saved since
+(for logs from before that line).
 
 After each battle the bot saves the replay on the server and adds its link
 to runs/showdown/replays.txt (date, result, opponent, link). Replays are

@@ -65,6 +65,34 @@ class Config:
                                     # positions, the weight fading from kickstart_coef to 0 over kickstart_minutes
     kickstart_coef: float = 1.0
     kickstart_minutes: float = 720.0
+    # Teams to practise most (names as --team takes them, ";" between): the
+    # ones the bot plays on the ladder. They appear in about `focus_share`
+    # of the games (one side), against the usual corpus; with a --baseline,
+    # each evaluation also plays them against the baseline on the placed
+    # teams (vs_baseline_focus).
+    focus: str = ""
+    focus_share: float = 0.25
+
+
+def focus_sources(c: Config, out: Path) -> list[str]:
+    """The corpus plus a folder of the focus teams, weighted so a game has
+    one in about `focus_share` of cases (each side draws a team by weight)."""
+    from selfplay.env import DEFAULT_CORPUS
+    from selfplay.showdown.team import find_team
+    names = [n.strip() for n in c.focus.split(";") if n.strip()]
+    folder = out / "focus"
+    folder.mkdir(parents=True, exist_ok=True)
+    for old in folder.glob("*.txt"):
+        old.unlink()
+    for name in names:
+        path = find_team(name)
+        (folder / path.name).write_text(path.read_text(encoding="utf-8-sig"), encoding="utf-8")
+    total = sum(SelfPlayEnv(1).team_weights())
+    # A game has a focus team with chance 1 - (1 - p)^2 = share, p the chance
+    # one side's draw is one: their weight is total * p / (1 - p).
+    p = 1 - (1 - min(max(c.focus_share, 0.0), 0.99)) ** 0.5
+    each = total * p / (1 - p) / max(1, len(names))
+    return list(DEFAULT_CORPUS) + [f"{folder}={each:.4f}"]
 
 
 def scheduled_lr(c: Config, done: float, minutes: float, fresh: float) -> float:
@@ -159,8 +187,10 @@ class Trainer:
         self.baseline = None
         self.opt = torch.optim.Adam(self.model.parameters(), lr=cfg.lr)
         self.teacher = None  # kickstarting's, loaded when the run starts
+        self.sources = focus_sources(cfg, out) if cfg.focus else None
         self.env = SelfPlayEnv(cfg.envs, seed=cfg.seed, threads=cfg.threads,
-                               perfect_info=cfg.perfect_info)
+                               perfect_info=cfg.perfect_info,
+                               **({"corpus": self.sources} if self.sources else {}))
         if torch.device(cfg.device).type == "cuda":
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
@@ -589,6 +619,11 @@ class Trainer:
                     self.model.eval()
                     entry["vs_baseline"] = head_to_head(self.model, self.baseline, c.eval_games,
                                                         4000 + self.updates, c.perfect_info, sample=True)
+                    if self.sources:
+                        from selfplay.evaluate import focus_head_to_head
+                        entry["vs_baseline_focus"] = focus_head_to_head(
+                            self.model, self.baseline, self.sources, c.eval_games, 5000 + self.updates,
+                            c.perfect_info)
                     self.model.train()
                 entry["vs_random"] = evaluate(self.model, "random", c.eval_games, 1000 + self.updates,
                                               c.perfect_info)

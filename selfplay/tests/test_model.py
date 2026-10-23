@@ -209,3 +209,35 @@ def test_kickstarting_pulls_the_policy_toward_the_teacher(tmp_path):
     _, plain = trained_gap(False, tmp_path / "plain")
     print("gap to teacher: start %.4f, kickstarted %.4f, plain %.4f" % (before, kicked, plain))
     assert kicked < 0.8 * before and kicked < 0.8 * plain, (before, kicked, plain)
+
+
+def test_focus_teams_appear_in_their_share_of_games_and_are_evaluated(tmp_path):
+    """--focus: the named team gets a folder of its own, weighted so about
+    `focus_share` of games have it on one side; the evaluation plays it
+    (this model) against the placed teams (the baseline), exact games."""
+    from selfplay.env import SelfPlayEnv
+    from selfplay.evaluate import focus_head_to_head
+    from selfplay.model import PolicyNet
+    from selfplay.train import Config, focus_sources
+    cfg = Config(focus="lovejapanfrombr's Salamence Sand Team", focus_share=0.3)
+    sources = focus_sources(cfg, tmp_path)
+    assert (tmp_path / "focus" / "lovejapanfrombr's Salamence Sand Team.txt").is_file()
+    env = SelfPlayEnv(4000, corpus=sources, seed=1)
+    names = env.team_names()
+    focus = {i for i, n in enumerate(names) if n.startswith("focus/")}
+    assert len(focus) == 1
+    share = np.mean([bool(focus & set(env.game_teams(g))) for g in range(env.num_envs)])
+    assert abs(share - 0.3) < 0.03, share
+    torch.manual_seed(0)
+    a, b = PolicyNet(d=32, layers=1), PolicyNet(d=32, layers=1)
+    s = focus_head_to_head(a, b, sources, games=8, seed=3)
+    assert 0.0 <= s <= 1.0
+    # A training run with a baseline logs the focus evaluation.
+    base = tmp_path / "base.pt"
+    torch.save({"model": b.state_dict(), "config": {"d": 32, "layers": 1}}, base)
+    out = tmp_path / "run"
+    t = Trainer(Config(envs=16, steps=16, d=32, layers=1, league_frac=0.0, minibatch=256, epochs=1,
+                       eval_every=1, eval_games=8, baseline=str(base), focus=cfg.focus), out)
+    t.run(minutes=10, max_updates=1)
+    entry = [json.loads(line) for line in (out / "log.jsonl").read_text().splitlines()][-1]
+    assert 0.0 <= entry["vs_baseline_focus"] <= 1.0

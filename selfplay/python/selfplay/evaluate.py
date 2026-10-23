@@ -51,6 +51,48 @@ def head_to_head(a: PolicyNet, b: PolicyNet, games: int, seed: int, perfect_info
     return float(score / done)
 
 
+@torch.no_grad()
+def focus_head_to_head(a: PolicyNet, b: PolicyNet, sources: list[str], games: int, seed: int,
+                       perfect_info: bool = True, sample: bool = True, top_weight: float = 4.0) -> float:
+    """`a` playing the focus teams (the corpus folder named "focus") against
+    `b` playing the placed teams (Top 8 or better), sides alternating: how
+    well `a` plays the team it will play, against a fixed opponent. Counts
+    exactly `games` games."""
+    score = done = 0.0
+    for a_side in (0, 1):
+        env = SelfPlayEnv(min(128, games // 2), corpus=sources, seed=seed + a_side, perfect_info=perfect_info)
+        names, weights = env.team_names(), env.team_weights()
+        focus = [i for i, n in enumerate(names) if n.startswith("focus/")]
+        field = [i for i, n in enumerate(names) if "/" not in n and weights[i] >= top_weight]
+        if not focus or not field:
+            return float("nan")
+        rng = np.random.default_rng(seed + a_side)
+        pairs = []
+        for k in range(games // 2):
+            f, o = focus[k % len(focus)], int(field[rng.integers(len(field))])
+            pairs.append((f, o) if a_side == 0 else (o, f))
+        env.set_matchups(pairs)
+        n = env.num_envs
+        slot, next_slot, left = list(range(n)), n, len(pairs)
+        while left:
+            obs = env.observe()
+            actions = np.full((n, 2), -1, np.int64)
+            for model, side in ((a, a_side), (b, 1 - a_side)):
+                rows = np.flatnonzero(obs.decisions[:, side] != 0) * 2 + side
+                if len(rows):
+                    act_, _, _ = act(model, to_tensors(obs, rows), greedy=not sample)
+                    actions[rows // 2, side] = act_.numpy()
+            r = env.step(actions)
+            for g in np.flatnonzero(r.done):
+                if slot[g] < len(pairs):
+                    score += (r.reward[g, a_side] + 1) / 2
+                    done += 1
+                    left -= 1
+                slot[g] = next_slot
+                next_slot += 1
+    return float(score / max(done, 1))
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("model")

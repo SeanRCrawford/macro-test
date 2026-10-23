@@ -536,12 +536,35 @@ def summary(result: dict, out=print, games: list | None = None):
         "checked but left out would gain against its mix; estimate: the search's own value)")
 
 
+def filter_logs(logs: list[Path], played_by: str | None = None, after: str | None = None) -> list[Path]:
+    """The logs whose "|bot|played by" line contains `played_by` (logs from
+    before the client wrote one never match), saved after `after`."""
+    out = []
+    since = None
+    if after:
+        fmt = "%Y-%m-%d %H:%M" if " " in after.strip() else "%Y-%m-%d"
+        since = time.mktime(time.strptime(after.strip(), fmt))
+    for path in logs:
+        if since is not None and path.stat().st_mtime < since:
+            continue
+        if played_by:
+            with open(path, encoding="utf-8") as f:
+                head = f.readline()
+            if not (head.startswith("|bot|played by ") and played_by in head):
+                continue
+        out.append(path)
+    return out
+
+
 def main():
     from selfplay.evaluate import load
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("model")
     p.add_argument("logs", nargs="+")
     p.add_argument("--opponent", default=None, help="only games against this player")
+    p.add_argument("--played-by", default=None,
+                   help="only logs whose '|bot|played by' line contains this (e.g. ppo10, or budget=16000)")
+    p.add_argument("--after", default=None, help="only logs saved after this date (YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
     p.add_argument("--settings", nargs="+", default=["policy", "default"])
     p.add_argument("--seeds", type=int, default=4, help="chance samples per action pair, one turn ahead")
     p.add_argument("--judge-budget", type=int, default=0,
@@ -557,8 +580,10 @@ def main():
     model = load(a.model, a.device)
     # Windows shells pass wildcards on unexpanded: expand them here.
     logs = sorted({Path(f) for x in a.logs for f in (glob.glob(x) if glob.has_magic(x) else [x])})
+    logs = filter_logs(logs, a.played_by, a.after)
     if not logs:
-        raise SystemExit(f"no logs match {' '.join(a.logs)}")
+        raise SystemExit(f"no logs match {' '.join(a.logs)}"
+                         + (" with those filters" if a.played_by or a.after else ""))
     games: list = []
     decisions = collect(model, logs, opponent=a.opponent, games=games)
     if a.limit and len(decisions) > a.limit:

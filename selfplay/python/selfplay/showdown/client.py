@@ -115,7 +115,7 @@ class Client:
                  timer: bool = False, log_dir: str = "runs/showdown",
                  local: bool = False, think_delay: float = 0.3, ots_wait: float = 20.0,
                  replays: str = "unlisted", max_seconds: float = 20.0, arena: bool = False,
-                 reconnect_delay: float = 2.0, out=print):
+                 reconnect_delay: float = 2.0, played_by: str = "", out=print):
         """`make_bot()` -> a fresh Bot per battle. `challenge`: users to
         challenge (one battle at a time, in turn). `accept`: accept
         challenges from these users ([] = anyone; None = none). `replays`:
@@ -124,7 +124,9 @@ class Client:
         search may take (less when the battle timer is short). `arena`: VGC
         Arena: `password` is the bot's token, sent with /trn as it is; the
         client stays online, reconnecting after a drop, and plays every
-        battle it is put in (there, a challenge needs no answer)."""
+        battle it is put in (there, a challenge needs no answer).
+        `played_by`: the model and settings, written at the top of each
+        battle's saved log ("|bot|played by ...")."""
         self.make_bot, self.team, self.name, self.password = make_bot, team, name, password
         self.server, self.format = server, fmt
         self.to_challenge = list(challenge)
@@ -137,6 +139,7 @@ class Client:
         self.max_seconds = max_seconds
         self.replays_waiting: dict[str, tuple[str, str, str]] = {}  # replay id -> (room, result, opponent)
         self.out = out
+        self.played_by = played_by
         self.battles: dict[str, Battle] = {}
         self.record = {"win": 0, "loss": 0, "tie": 0}
         self.series_record = {"win": 0, "loss": 0, "tie": 0}
@@ -514,7 +517,8 @@ class Client:
             self.out(f"[{b.room}] tracker notes: " + "; ".join(b.tracker.warnings[:8]))
         self.log_dir.mkdir(parents=True, exist_ok=True)
         path = self.log_dir / f"{b.room}.log"
-        path.write_text("\n".join(b.log) + "\n", encoding="utf-8")
+        head = [f"|bot|played by {self.played_by}"] if self.played_by else []
+        path.write_text("\n".join(head + b.log) + "\n", encoding="utf-8")
         self.out(f"[{b.room}] log: {path}")
         if self.arena:
             self.out(f"[{b.room}] https://vgc.bot/battles/{b.room.rsplit('-', 1)[-1]}")

@@ -149,7 +149,10 @@ def main():
     client = Client(make_bot, team, a.user, a.password,
                     server=a.server, fmt=a.format, challenge=a.challenge, accept=a.accept,
                     games=a.games, ots=not a.no_ots, timer=a.timer, log_dir=a.log_dir, local=a.local,
-                    ots_wait=a.ots_wait, replays=a.replays, max_seconds=a.max_seconds, arena=a.arena)
+                    ots_wait=a.ots_wait, replays=a.replays, max_seconds=a.max_seconds, arena=a.arena,
+                    played_by=f"{a.model} " + ("policy" if a.policy else
+                                               f"budget={a.budget} search={a.search or 'default'} "
+                                               f"max_seconds={a.max_seconds}"))
     print("Ctrl+C: finish the battle in progress, then go offline (press it twice to quit at once)")
     asyncio.run(run_until_stopped(client))
     r, s = client.record, client.series_record

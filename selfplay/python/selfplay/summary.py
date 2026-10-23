@@ -65,9 +65,11 @@ def summarize(run: Path, rows: int = 16, last: int = 10, eval_games: int = 400) 
     out.append(f"training: {train[-1]['update']} updates, {train[-1]['minutes']:.0f} min, "
                f"{train[-1]['games'] / 1e6:.1f}M games")
     kicked = any("teacher_kl" in e for e in train)
+    focused = any("vs_baseline_focus" in e for e in train)
     out.append(f"{'min':>6s} {'games':>7s} {'g/s':>5s} {'lr':>8s} {'entropy':>7s} {'v_loss':>6s} "
                f"{'opp_ce':>6s} {'vs_baseline':>11s} {'(Elo)':>6s} {'n':>3s} {'vs_greedy':>9s} "
-               f"{'gpu_W':>5s} {'vram':>5s}" + (f" {'t_kl':>6s}" if kicked else ""))
+               f"{'gpu_W':>5s} {'vram':>5s}" + (f" {'t_kl':>6s}" if kicked else "")
+               + (f" {'focus':>6s}" if focused else ""))
     for lo, hi in zip(edges[:-1], edges[1:]):
         group = [e for e in train if lo < e["minutes"] <= hi]
         if not group:
@@ -84,7 +86,8 @@ def summarize(run: Path, rows: int = 16, last: int = 10, eval_games: int = 400) 
                    f"{np.mean([g['opponent_ce'] for g in group]):6.3f} "
                    f"{base:11.3f} {elo(base) if n else float('nan'):+6.0f} {n:3d} {greedy:9.3f} "
                    f"{watts:5.1f} {vram:5.2f}"
-                   + (f" {pooled(group, 'teacher_kl')[0]:6.3f}" if kicked else ""))
+                   + (f" {pooled(group, 'teacher_kl')[0]:6.3f}" if kicked else "")
+                   + (f" {pooled(group, 'vs_baseline_focus')[0]:6.3f}" if focused else ""))
     evals = [e for e in train if "vs_baseline" in e][-last:]
     if evals:
         s, n = pooled(evals, "vs_baseline")
@@ -92,6 +95,12 @@ def summarize(run: Path, rows: int = 16, last: int = 10, eval_games: int = 400) 
         out.append(f"last {n} evaluations against the baseline: {s:.3f} +-{se:.3f} "
                    f"({n * eval_games} games), {elo(s):+.0f} Elo "
                    f"({elo(s - 2 * se):+.0f} to {elo(s + 2 * se):+.0f})")
+    fevals = [e for e in train if "vs_baseline_focus" in e][-last:]
+    if fevals:
+        s, n = pooled(fevals, "vs_baseline_focus")
+        se = math.sqrt(s * (1 - s) / (n * eval_games))
+        out.append(f"last {n} evaluations of the focus teams (this model on them, the baseline on the placed "
+                   f"teams): {s:.3f} +-{se:.3f}")
     return out
 
 

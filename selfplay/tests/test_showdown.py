@@ -534,3 +534,25 @@ def test_one_ctrl_c_asks_the_client_to_stop_instead_of_killing_it():
     c = FakeClient()
     asyncio.run(run_until_stopped(c))
     assert c.asked == 1
+
+
+def test_diagnosis_filters_logs_by_who_played_them_and_when(tmp_path):
+    """The client writes "|bot|played by MODEL settings" atop each saved
+    log; the diagnosis keeps the logs that match, and those saved after a
+    date."""
+    import os
+    import time
+
+    from selfplay.showdown.diagnose import filter_logs
+    new = tmp_path / "new.log"
+    new.write_text("|bot|played by runs/ppo10/model.pt budget=16000 search=root_share=0.5\n|init|battle\n")
+    old = tmp_path / "old.log"
+    old.write_text("|init|battle\n")
+    then = time.mktime(time.strptime("2026-01-01", "%Y-%m-%d"))
+    os.utime(old, (then, then))
+    logs = [new, old]
+    assert filter_logs(logs) == logs
+    assert filter_logs(logs, played_by="ppo10") == [new]
+    assert filter_logs(logs, played_by="budget=2000") == []
+    assert filter_logs(logs, after="2026-06-01") == [new]
+    assert filter_logs(logs, after="2025-12-31 23:00") == logs
