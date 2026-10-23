@@ -59,7 +59,12 @@ class Api:
                     time.sleep(delay)
                     continue
                 raise
-        raise RuntimeError(f"{url}: the arena kept refusing")
+            except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+                # A dropped or reset connection: wait and try again.
+                delay = 2.0 ** attempt
+                self.out(f"  connection trouble ({type(getattr(e, 'reason', e)).__name__}); retrying in {delay:.0f}s")
+                time.sleep(delay)
+        raise RuntimeError(f"{url}: the arena kept refusing or dropping the connection")
 
 
 def entries_of(reply) -> list[dict]:

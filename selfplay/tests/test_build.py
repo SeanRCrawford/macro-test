@@ -179,7 +179,8 @@ def test_the_arena_field_is_the_strong_bots_teams_weighted_by_battles(tmp_path):
     teams = collect(battles, bots)
     assert [(t["battles"], t["wins"]) for t in teams] == [(3, 2), (2, 1)]  # Top's team thrice; Mid's twice
     out = tmp_path / "field"
-    weights = write_field(teams, out, say=lambda *_: None)
+    assert write_field(teams, out, say=lambda *_: None, min_battles=3) == {"Top arena team 1": 3 ** 0.5}
+    weights = write_field(teams, out, say=lambda *_: None, weight="battles")
     assert weights == {"Top arena team 1": 3, "Mid arena team 1": 2}
     text = (out / "Top arena team 1.txt").read_text()
     assert "Charizard @ Charizardite Y" in text and "Modest Nature" in text and "- Weather Ball" in text

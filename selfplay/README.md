@@ -288,10 +288,11 @@ The teams the strongest bots play, as a field for the team builder:
     python -m selfplay.build runs/ppo10/model.pt --start "..." --keep Tyranitar Excadrill --vs-dir runs/arena_field --device cuda
 
 takes the open team sheets of the 15 bots with the highest latest rating
-(or `--min-rating`), writes one paste per distinct team (stat points from
-usage, as the sheets don't show them) and weights.json (each team's
-battles), and lists any team the engine can't play yet. `--vs-dir` makes
-those teams, so weighted, the builder's field.
+(or `--min-rating`), writes one paste per distinct team played 5+ times
+(`--min-battles`; several bots change team every battle; stat points from
+usage, as the sheets don't show them) and weights.json (the square root of
+each team's battles, `--weight`), and lists any team the engine can't play
+yet. `--vs-dir` makes those teams, so weighted, the builder's field.
 
 ## Regenerate data from Showdown
 

@@ -561,7 +561,8 @@ def test_diagnosis_filters_logs_by_who_played_them_and_when(tmp_path):
 def test_arena_battles_downloads_new_battles_once_and_waits_on_429(tmp_path):
     """Against a stand-in for vgc.bot's API: every battle after the
     highest id downloaded is listed oldest first and its log saved once; a
-    second run fetches only what is new; a 429 is waited out."""
+    second run fetches only what is new; a 429 is waited out, a dropped
+    connection retried."""
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import parse_qs, urlparse
@@ -571,7 +572,7 @@ def test_arena_battles_downloads_new_battles_once_and_waits_on_429(tmp_path):
     battles = [{"id": i, "format": "gen9championsvgc2026regmcots", "winner": "p1" if i % 2 else "p2", "turns": 7,
                 "p1": {"bot": {"name": "Scronk"}, "ratingAfter": 1500 + i},
                 "p2": {"bot": {"name": "Rival"}, "ratingAfter": 1400 - i}} for i in range(1, 6)]
-    hits = {"429": 0, "logs": 0}
+    hits = {"429": 0, "logs": 0, "reset": 0}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -579,6 +580,10 @@ def test_arena_battles_downloads_new_battles_once_and_waits_on_429(tmp_path):
 
         def do_GET(self):
             u = urlparse(self.path)
+            if u.path == "/api/battles" and hits["reset"] == 0:
+                hits["reset"] += 1  # the first listing's connection drops without a reply
+                self.close_connection = True
+                return
             if u.path == "/api/battles":
                 q = parse_qs(u.query)
                 after, limit = int(q["after"][0]), int(q["limit"][0])
@@ -607,7 +612,7 @@ def test_arena_battles_downloads_new_battles_once_and_waits_on_429(tmp_path):
         api = Api(f"http://127.0.0.1:{server.server_port}", per_minute=60_000, out=lambda *_: None)
         assert download(tmp_path, api, say=lambda *_: None) == 5
         assert sorted(p.name for p in tmp_path.glob("*.log")) == [f"{i}.log" for i in range(1, 6)]
-        assert hits == {"429": 1, "logs": 5}
+        assert hits == {"429": 1, "logs": 5, "reset": 1}
         assert download(tmp_path, api, say=lambda *_: None) == 0
         battles.append(dict(battles[0], id=6))
         assert download(tmp_path, api, say=lambda *_: None) == 1 and hits["logs"] == 6

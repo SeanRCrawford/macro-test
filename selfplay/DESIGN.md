@@ -1619,6 +1619,20 @@ variants picks the ones it overrates most. Now:
   300 variants: 184 one set change, 56 one swap, 37 two set changes, 15
   two swaps, 8 a swap and a set change.
 
+**The arena's field.** VGC Arena (2026-10-23): 11,364 finished battles,
+5,007 on the open team sheets ladder, 56 bots. Top latest ratings:
+Wolfe_Alt6767 1788, mikumiku-ots-u0353 1784, mikumiku-ots-u0277 1638,
+NottiLiam 1633, MoccaOTS 1621; NessieOTS 1567; Scronk 1463 from 54 games
+on 2026-10-20/21 (ppo7 at 2,000, 24 of them against rokusho_version, 7-17),
+so it says little of ppo10. The 15 highest rated bots' open sheets hold
+1,431 distinct teams (several bots change team nearly every battle:
+NessieOTS 378 teams, Wolfe 279); 88 were played 5+ times, 59% of their
+battles. Free Pasteque's Charizard/Sylveon team alone is 790 battles, and
+MoccaOTS and Sayonara play nearly the same rain team (536 and 489), so
+`arena_field` weights a team by the square root of its battles. All 88
+load. The sand team against them (ppo6k on both sides, 16 games a
+matchup): weighted mean 0.540, worst quarter 0.289.
+
 **What the evaluation can't see.** The bot plays both sides, so a team is
 rated as the bot plays it: one it hasn't practised (most variants) may
 rate low until it has. Finalists belong in data/my_teams for a stretch of
