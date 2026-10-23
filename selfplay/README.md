@@ -282,6 +282,17 @@ runs/arena/battles.jsonl, and fetches only new battles when run again,
 within the API's rate limit. It ends with the battles per format and the
 bots with the most battles and their win rates.
 
+The teams the strongest bots play, as a field for the team builder:
+
+    python -m selfplay.showdown.arena_field runs/arena --out runs/arena_field --top-bots 15
+    python -m selfplay.build runs/ppo10/model.pt --start "..." --keep Tyranitar Excadrill --vs-dir runs/arena_field --device cuda
+
+takes the open team sheets of the 15 bots with the highest latest rating
+(or `--min-rating`), writes one paste per distinct team (stat points from
+usage, as the sheets don't show them) and weights.json (each team's
+battles), and lists any team the engine can't play yet. `--vs-dir` makes
+those teams, so weighted, the builder's field.
+
 ## Regenerate data from Showdown
 
 Showdown is the rules authority. Both scripts need a built checkout of

@@ -140,3 +140,50 @@ def test_every_scheduled_game_counts_once_and_previews_are_read(pool):
         assert all(len(r[3]) == 4 and len(r[4]) == 4 and r[3].isdigit() for r in res)
     finally:
         arena.close()
+
+
+P1 = ("Charizard||CharizarditeY|Blaze|HeatWave,WeatherBall,SolarBeam,Protect|Modest||M|||50|]Sylveon||FairyFeather|"
+      "Pixilate|HyperVoice,QuickAttack,HyperBeam,Detect|Modest||M|||50|]Kingambit||FocusSash|Defiant|KowtowCleave,"
+      "IronHead,LowKick,SuckerPunch|Adamant||M|||50|]Farigiraf||SitrusBerry|ArmorTail|ExpandingForce,Thunderbolt,"
+      "TrickRoom,Protect|Bold||M|||50|]Aerodactyl||Aerodactylite|Unnerve|RockSlide,DualWingbeat,Tailwind,Protect|"
+      "Jolly||F|||50|]Garchomp||LifeOrb|RoughSkin|DragonClaw,Earthquake,Protect,StompingTantrum|Jolly||F|||50|")
+P2 = ("Sneasler||WhiteHerb|Unburden|DireClaw,CloseCombat,RockSlide,Protect|Adamant||M|||50|]Floette-Eternal||"
+      "Floettite|FlowerVeil|Moonblast,DazzlingGleam,LightofRuin,Protect|Timid||F|||50|]Pelipper||DampRock|Drizzle|"
+      "WeatherBall,Hurricane,HelpingHand,WideGuard|Calm||M|||50|]Archaludon||Leftovers|Stamina|ElectroShot,"
+      "DragonPulse,AuraSphere,Protect|Calm||M|||50|]Basculegion-F||FocusSash|SwiftSwim|MuddyWater,ShadowBall,IceBeam,"
+      "Protect|Modest||F|||50|]Golisopod||Golisopite|EmergencyExit|LeechLife,SuckerPunch,IronHead,Protect|"
+      "Adamant||F|||50|")
+
+
+def test_the_arena_field_is_the_strong_bots_teams_weighted_by_battles(tmp_path):
+    """From downloaded open-sheet battles: the top-rated bots' teams as
+    pastes, one per distinct team, weighted by battles; the builder takes
+    the folder as its field."""
+    import json
+
+    from selfplay.build import dir_field
+    from selfplay.env import SelfPlayEnv
+    from selfplay.showdown.arena_field import collect, strongest, write_field
+    battles = tmp_path / "battles"
+    battles.mkdir()
+    entries = []
+    for i, (a, b, win) in enumerate([("Top", "Mid", "p1"), ("Mid", "Top", "p1"), ("Low", "Top", "p2")], 1):
+        entries.append({"id": i, "format": "gen9championsvgc2026regmcots", "winner": win,
+                        "p1": {"bot": {"name": a}, "ratingAfter": {"Top": 1800, "Mid": 1600, "Low": 1300}[a]},
+                        "p2": {"bot": {"name": b}, "ratingAfter": {"Top": 1800, "Mid": 1600, "Low": 1300}[b]}})
+        sheet = {"Top": P1, "Mid": P2, "Low": P2}
+        (battles / f"{i}.log").write_text(f"|init|battle\n|showteam|p1|{sheet[a]}\n|showteam|p2|{sheet[b]}\n|win|x\n")
+    (battles / "battles.jsonl").write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+    bots = strongest(entries, top=2, min_rating=None)
+    assert list(bots) == ["Top", "Mid"]
+    teams = collect(battles, bots)
+    assert [(t["battles"], t["wins"]) for t in teams] == [(3, 2), (2, 1)]  # Top's team thrice; Mid's twice
+    out = tmp_path / "field"
+    weights = write_field(teams, out, say=lambda *_: None)
+    assert weights == {"Top arena team 1": 3, "Mid arena team 1": 2}
+    text = (out / "Top arena team 1.txt").read_text()
+    assert "Charizard @ Charizardite Y" in text and "Modest Nature" in text and "- Weather Ball" in text
+    env = SelfPlayEnv(1, corpus=[DEFAULT_CORPUS[0], str(out)])  # after the corpus, as the builder loads it
+    assert not [r for r in env.rejected() if r[0].startswith("field/")]
+    field, w = dir_field(env.team_names(), out)
+    assert len(field) == 2 and sorted(w) == [2.0, 3.0]

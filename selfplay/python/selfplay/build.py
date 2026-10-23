@@ -733,6 +733,17 @@ def field_teams(names: list[str], weights: list[float], vs: list[str], top_weigh
     return select(names, vs)
 
 
+def dir_field(names: list[str], folder: Path) -> tuple[list[int], np.ndarray]:
+    """The teams of a folder (loaded as a corpus source) as the field,
+    weighted by its weights.json (name -> weight; 1 for the rest), as
+    `selfplay.showdown.arena_field` writes it."""
+    prefix = folder.name + "/"
+    weights_file = folder / "weights.json"
+    given = json.loads(weights_file.read_text(encoding="utf-8")) if weights_file.exists() else {}
+    field = [i for i, n in enumerate(names) if n.startswith(prefix)]
+    return field, np.array([float(given.get(names[i][len(prefix):], 1.0)) for i in field])
+
+
 def load_start(spec: str) -> Team:
     from selfplay.showdown.team import find_team
     path = Path(spec)
@@ -751,6 +762,9 @@ def main():
     p.add_argument("--vs", nargs="+", default=["placed"],
                    help="the field: 'placed' (corpus teams placed --top or better), 'all', or names/prefixes")
     p.add_argument("--top", type=int, default=8, help="'placed' means this placement or better")
+    p.add_argument("--vs-dir", default=None,
+                   help="the field: the teams in this folder, weighted by its weights.json "
+                        "(e.g. runs/arena_field from selfplay.showdown.arena_field)")
     p.add_argument("--steps", type=int, default=1000, help="stop after this many steps")
     p.add_argument("--minutes", type=float, default=120.0, help="... or after this long (0: only --steps)")
     p.add_argument("--neighbours", type=int, default=300, help="variants screened per step")
@@ -788,12 +802,20 @@ def main():
     torch.set_grad_enabled(False)
     model = load(a.model, a.device)
     amp = a.device.startswith("cuda")
-    sources = list(DEFAULT_CORPUS)
+    sources = list(DEFAULT_CORPUS) + ([str(Path(a.vs_dir))] if a.vs_dir else [])
     base = SelfPlayEnv(1, corpus=sources)
     names, weights = base.team_names(), base.team_weights()
-    top_weight = {1: 8.0, 2: 6.0, 4: 5.0, 8: 4.0, 16: 3.0, 32: 2.0}.get(a.top, 1.5)
-    field = field_teams(names, weights, a.vs, top_weight)
-    w = np.array([weights[f] for f in field], np.float64)
+    if a.vs_dir:
+        field, w = dir_field(names, Path(a.vs_dir))
+        rejected = [r for r in base.rejected() if r[0].startswith(Path(a.vs_dir).name + "/")]
+        for name, why in rejected:
+            print(f"  left out of the field: {name}: {why}")
+    else:
+        top_weight = {1: 8.0, 2: 6.0, 4: 5.0, 8: 4.0, 16: 3.0, 32: 2.0}.get(a.top, 1.5)
+        field = field_teams(names, weights, a.vs, top_weight)
+        w = np.array([weights[f] for f in field], np.float64)
+    if not field:
+        raise SystemExit("no field teams")
     rounds = [int(x) for x in a.rounds.split(",")]
     print(f"field: {len(field)} teams; start:\n{team_paste(team)}")
     breaks = rule_breaks(team, pool, rules)
