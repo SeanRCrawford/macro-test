@@ -56,6 +56,7 @@ import torch
 def main():
     from selfplay.evaluate import load
     from selfplay.mcts import TreeConfig, with_settings
+    from selfplay.showdown.seen_teams import SEEN
     from selfplay.showdown.bot import Bot
     from selfplay.showdown.client import ARENA_FORMAT, ARENA_SERVER, FORMAT, MAIN_SERVER, Client
 
@@ -88,6 +89,8 @@ def main():
     p.add_argument("--ots-wait", type=float, default=20.0, help="seconds to wait for the opponent's sheet")
     p.add_argument("--timer", action="store_true", help="turn the battle timer on")
     p.add_argument("--log-dir", default="runs/showdown")
+    p.add_argument("--no-collect", action="store_true",
+                   help="don't add opponents' open team sheets to data/seen_teams (which training includes)")
     p.add_argument("--replays", choices=["unlisted", "public", "off"], default="unlisted",
                    help="save each battle's replay on the server (links in LOG_DIR/replays.txt)")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -150,6 +153,7 @@ def main():
                     server=a.server, fmt=a.format, challenge=a.challenge, accept=a.accept,
                     games=a.games, ots=not a.no_ots, timer=a.timer, log_dir=a.log_dir, local=a.local,
                     ots_wait=a.ots_wait, replays=a.replays, max_seconds=a.max_seconds, arena=a.arena,
+                    collect_teams=None if a.no_collect else SEEN,
                     played_by=f"{a.model} " + ("policy" if a.policy else
                                                f"budget={a.budget} search={a.search or 'default'} "
                                                f"max_seconds={a.max_seconds}"))

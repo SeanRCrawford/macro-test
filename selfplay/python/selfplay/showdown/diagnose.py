@@ -22,6 +22,7 @@ each side actually did that turn. Then:
 
     python -m selfplay.showdown.diagnose MODEL "runs/showdown/*.log" --opponent mikumiku37 \\
         --settings policy default budget=8000 --judge-budget 2000
+    python -m selfplay.showdown.diagnose MODEL "runs/showdown/*.log" --quick --quiet    # many games
 
 A setting is `name` or `key=value,key=value` over TreeConfig ("policy": no
 search). Every decision's searches run together, so the network sees large
@@ -574,8 +575,15 @@ def main():
     p.add_argument("--limit", type=int, default=0, help="at most this many decisions (spread over the games)")
     p.add_argument("--batch", type=int, default=256, help="positions searched together")
     p.add_argument("--quiet", action="store_true", help="no line per decision")
+    p.add_argument("--quick", action="store_true",
+                   help="for many games: one chance sample per pair, no deeper judging, the policy and the "
+                        "default search only (about a fifth of the time)")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = p.parse_args()
+    if a.quick:
+        a.seeds, a.judge_budget = 1, 0
+        if a.settings == ["policy", "default"]:
+            a.settings = ["policy"]  # the default search runs anyway (the bot's picture of the opponent)
     torch.set_grad_enabled(False)
     model = load(a.model, a.device)
     # Windows shells pass wildcards on unexpanded: expand them here.

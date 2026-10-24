@@ -26,12 +26,17 @@ from selfplay._engine import VecEnv as _VecEnv
 SIZES: dict = _VecEnv.sizes()
 _ROOT = Path(__file__).resolve().parents[2]
 #: Teams to play, as "FOLDER" (weighted by tournament placement in the file
-#: name) or "FOLDER=WEIGHT". Your own teams get weight 4, the same as a
-#: top-8 team, so the bot learns them well. Teams from every folder but the
-#: first are named "<folder>/<file name>".
+#: name), "FOLDER=WEIGHT" or "FOLDER=share:FRACTION" (the folder's teams
+#: together that fraction of the games); a folder's weights.json scales its
+#: teams against each other. Your own teams get weight 4, the same as a
+#: top-8 team, so the bot learns them well; the opponents' teams the bot has
+#: met (data/seen_teams, collected by the Showdown client) are SEEN_SHARE of
+#: the games, however many there are. Teams from every folder but the first
+#: are named "<folder>/<file name>".
+SEEN_SHARE = 0.2
 DEFAULT_CORPUS = [str(_ROOT / "data" / "corpus")] + [
     f"{d}=4" for d in (_ROOT.parent / "data" / "teams", _ROOT.parent / "data" / "my_teams") if d.is_dir()
-]
+] + [f"{d}=share:{SEEN_SHARE}" for d in (_ROOT.parent / "data" / "seen_teams",) if d.is_dir()]
 
 DECISION_NONE, DECISION_PREVIEW, DECISION_SLOTS = 0, 1, 2
 

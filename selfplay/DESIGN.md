@@ -1633,6 +1633,16 @@ MoccaOTS and Sayonara play nearly the same rain team (536 and 489), so
 load. The sand team against them (ppo6k on both sides, 16 games a
 matchup): weighted mean 0.540, worst quarter 0.289.
 
+**Opponents' teams in training.** The client saves each opponent's open
+team sheet (data/seen_teams, one paste per distinct team) and training
+always includes the folder. At weight 1 each, the arena's 30 best bots'
+teams played twice or more (1,265) would have been 56% of the games, so a
+source can now be `PATH=share:FRACTION` (its teams together that fraction
+of the draws, however many) and a weights.json in a folder scales its
+teams against each other: seen_teams is 20%, each team by the square root
+of how often it was met (Free Pasteque's 1,218-battle team 0.3% of all
+draws, a team met twice 0.012%; a placed Top-8 corpus team is about 0.4%).
+
 **What the evaluation can't see.** The bot plays both sides, so a team is
 rated as the bot plays it: one it hasn't practised (most variants) may
 rate low until it has. Finalists belong in data/my_teams for a stretch of

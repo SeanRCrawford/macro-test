@@ -218,7 +218,8 @@ leaves (so a move that pays off the turn after counts). Also how many
 turns past the current one each setting looked, and how exposed its mix
 was (the most a reply it checked but left out would gain). Search settings are
 `key=value` over the tree search's options; the client takes them as
-`--search`, e.g. `--budget 16000 --search root_share=0.5`. Each decision
+`--search`, e.g. `--budget 16000 --search root_share=0.5`. For many games,
+`--quick` (one chance sample, no deeper judging, about a fifth of the time). Each decision
 line also says how far the search looked ("looked 0.3 turns past this
 one"), and each saved log starts with the model and settings that played it
 ("|bot|played by runs/ppo10/model.pt budget=16000 ..."): `--played-by ppo10`
@@ -239,6 +240,26 @@ guess.
 To try it without an account, run a local server (in a pokemon-showdown
 checkout: `node pokemon-showdown start --no-security`) and add
 `--server ws://localhost:8000/showdown/websocket --local`.
+
+Where the games turned, over any number of them and without the network:
+
+    python -m selfplay.showdown.swings "runs/showdown/*.log" --played-by ppo11
+
+lists the biggest drops in the bot's own win estimate from one decision to
+the next (what it played and expected, what the opponent did, any luck: a
+critical hit, a miss, a flinch, full paralysis, a freeze, confusion), with
+a link to each battle, then how much of the lost estimate came on unlucky
+turns, by turn and by opponent. The drops without luck are the turns to
+watch.
+
+After each battle the client saves the opponent's open team sheet in
+../data/seen_teams (one paste per distinct team; `--no-collect` to stop),
+and training always includes that folder as 20% of its games, each team
+weighted by the square root of how often it was met. To add the teams of
+battles already played, or of the arena's strongest bots:
+
+    python -m selfplay.showdown.seen_teams --logs "runs/showdown/*.log"
+    python -m selfplay.showdown.seen_teams --arena runs/arena --top-bots 30 --min-battles 2
 
 ## Play on VGC Arena
 

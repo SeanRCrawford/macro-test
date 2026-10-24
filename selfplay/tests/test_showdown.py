@@ -621,3 +621,70 @@ def test_arena_battles_downloads_new_battles_once_and_waits_on_429(tmp_path):
         assert text.index("Scronk") < text.index("Rival") and "rating 1501" in text  # the latest rating
     finally:
         server.shutdown()
+
+
+SHEET = ("Sneasler||WhiteHerb|Unburden|DireClaw,CloseCombat,RockSlide,Protect|Adamant||M|||50|]Floette-Eternal||"
+         "Floettite|FlowerVeil|Moonblast,DazzlingGleam,LightofRuin,Protect|Timid||F|||50|]Pelipper||DampRock|Drizzle|"
+         "WeatherBall,Hurricane,HelpingHand,WideGuard|Calm||M|||50|]Archaludon||Leftovers|Stamina|ElectroShot,"
+         "DragonPulse,AuraSphere,Protect|Calm||M|||50|]Basculegion-F||FocusSash|SwiftSwim|MuddyWater,ShadowBall,IceBeam,"
+         "Protect|Modest||F|||50|]Golisopod||Golisopite|EmergencyExit|LeechLife,SuckerPunch,IronHead,Protect|"
+         "Adamant||F|||50|")
+
+
+def test_opponents_team_sheets_are_collected_once_each_for_training(tmp_path):
+    """Each opponent's open team sheet in a battle log becomes one paste in
+    the folder however often it's met (ours isn't saved); the corpus
+    loads the folder."""
+    from selfplay.env import DEFAULT_CORPUS, SelfPlayEnv
+    from selfplay.showdown.seen_teams import add, opponents_in, our_side
+    log = ("|player|p1|Scronk|1|\n|player|p2|MoccaOTS|2|\n"
+           f"|showteam|p1|{SHEET}\n|showteam|p2|{SHEET}\n"
+           '|request|{"active":[],"side":{"name":"Scronk","id":"p1","pokemon":[]}}\n|win|Scronk\n')
+    assert our_side(log) == "p1"
+    seen = opponents_in(log, "p1")
+    assert [who for who, _ in seen] == ["MoccaOTS"] and len(seen[0][1]) == 6
+    folder = tmp_path / "seen_teams"
+    assert add(seen[0][1], "MoccaOTS", folder) == ("MoccaOTS 1", True)
+    assert add(seen[0][1], "Sayonara", folder) == ("MoccaOTS 1", False)  # the same team, met again
+    index = json.loads((folder / "index.json").read_text())
+    (entry,) = index.values()
+    assert entry["seen"] == 2 and entry["by"] == {"MoccaOTS": 1, "Sayonara": 1}
+    text = (folder / "MoccaOTS 1.txt").read_text()
+    assert "Floette-Eternal @ Floettite" in text and "- Light of Ruin" in text
+    assert json.loads((folder / "weights.json").read_text()) == {"MoccaOTS 1": round(2 ** 0.5, 4)}
+    # Training takes the folder as a fixed share of its games.
+    env = SelfPlayEnv(1, corpus=[DEFAULT_CORPUS[0], f"{folder}=share:0.2"])
+    names, weights = env.team_names(), env.team_weights()
+    assert "seen_teams/MoccaOTS 1" in names
+    assert abs(weights[names.index("seen_teams/MoccaOTS 1")] / sum(weights) - 0.2) < 1e-9
+    assert not [r for r in env.rejected() if r[0].startswith("seen_teams/")]
+
+
+def test_swings_finds_the_biggest_drops_and_the_luck_in_them(tmp_path):
+    """From the bot's logged estimates: each decision's swing to the next
+    one (or the result), the luck on that turn for either side, and the
+    totals."""
+    from selfplay.showdown.swings import read_game, report
+    log = tmp_path / "battle-gen9championsvgc2026regmcots-11530.log"
+    log.write_text("\n".join([
+        "|player|p1|Scronk|1|", "|player|p2|Rival|2|",
+        '|request|{"active":[],"side":{"name":"Scronk","id":"p1","pokemon":[]}}',
+        "|bot|turn 1: Rock Slide, Protect  | win 60% (search, 2000 evals, 1.0s; network alone 58%); "
+        "60% Rock Slide, Protect || expects: 70% Garchomp Earthquake",
+        "|move|p2a: Garchomp|Earthquake|p1a: Tyranitar|[spread] p1a,p1b", "|-crit|p1a: Tyranitar",
+        "|faint|p1a: Tyranitar",
+        "|bot|turn 2: Iron Head -> Garchomp  | win 20% (search, 2000 evals, 1.0s; network alone 25%); 90% Iron Head",
+        "|-miss|p2a: Garchomp|p1b: Excadrill",
+        "|bot|turn 3: High Horsepower  | win 45% (search, 2000 evals, 1.0s; network alone 40%); 90% High Horsepower",
+        "|win|Rival"]) + "\n")
+    g = read_game(log, {})
+    assert g.opponent == "Rival" and g.won == 0.0 and g.link == "https://vgc.bot/battles/11530"
+    assert [round(d.after - d.estimate, 2) for d in g.decisions] == [-0.4, 0.25, -0.45]
+    assert g.decisions[0].luck == [("them", "critical hit on Tyranitar")]
+    assert g.decisions[1].luck == [("us", "Garchomp missed")]
+    assert g.decisions[0].expects.startswith("70% Garchomp")
+    lines = []
+    report([g], top=2, out=lines.append)
+    text = "\n".join(lines)
+    assert "-45" in text and "bad luck: critical hit on Tyranitar" in text
+    assert "of the 2 drops of 25 points or more, 1 had bad luck in them and 1 didn't" in text

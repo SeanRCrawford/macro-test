@@ -115,7 +115,7 @@ class Client:
                  timer: bool = False, log_dir: str = "runs/showdown",
                  local: bool = False, think_delay: float = 0.3, ots_wait: float = 20.0,
                  replays: str = "unlisted", max_seconds: float = 20.0, arena: bool = False,
-                 reconnect_delay: float = 2.0, played_by: str = "", out=print):
+                 reconnect_delay: float = 2.0, played_by: str = "", collect_teams=None, out=print):
         """`make_bot()` -> a fresh Bot per battle. `challenge`: users to
         challenge (one battle at a time, in turn). `accept`: accept
         challenges from these users ([] = anyone; None = none). `replays`:
@@ -126,7 +126,8 @@ class Client:
         client stays online, reconnecting after a drop, and plays every
         battle it is put in (there, a challenge needs no answer).
         `played_by`: the model and settings, written at the top of each
-        battle's saved log ("|bot|played by ...")."""
+        battle's saved log ("|bot|played by ..."). `collect_teams`: a folder
+        (data/seen_teams) to add each opponent's open team sheet to."""
         self.make_bot, self.team, self.name, self.password = make_bot, team, name, password
         self.server, self.format = server, fmt
         self.to_challenge = list(challenge)
@@ -140,6 +141,7 @@ class Client:
         self.replays_waiting: dict[str, tuple[str, str, str]] = {}  # replay id -> (room, result, opponent)
         self.out = out
         self.played_by = played_by
+        self.collect_teams = Path(collect_teams) if collect_teams else None
         self.battles: dict[str, Battle] = {}
         self.record = {"win": 0, "loss": 0, "tie": 0}
         self.series_record = {"win": 0, "loss": 0, "tie": 0}
@@ -519,6 +521,15 @@ class Client:
         path = self.log_dir / f"{b.room}.log"
         head = [f"|bot|played by {self.played_by}"] if self.played_by else []
         path.write_text("\n".join(head + b.log) + "\n", encoding="utf-8")
+        if self.collect_teams:
+            # The opponent's open team sheet, for training (data/seen_teams).
+            from selfplay.showdown.seen_teams import add, opponents_in
+            try:
+                for who, sets in opponents_in("\n".join(b.log), b.tracker.us):
+                    name, new = add(sets, who, self.collect_teams)
+                    self.out(f"[{b.room}] {who}'s team: {'new, saved as' if new else 'seen before:'} {name}")
+            except Exception as e:  # never lose a battle's bookkeeping over this
+                self.out(f"[{b.room}] couldn't save the opponent's team: {type(e).__name__}: {e}")
         self.out(f"[{b.room}] log: {path}")
         if self.arena:
             self.out(f"[{b.room}] https://vgc.bot/battles/{b.room.rsplit('-', 1)[-1]}")
