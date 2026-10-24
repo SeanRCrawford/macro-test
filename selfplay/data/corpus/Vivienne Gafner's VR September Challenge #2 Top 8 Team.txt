@@ -1,0 +1,48 @@
+Gengar @ Gengarite  
+Ability: Cursed Body  
+Timid Nature  
+- Sludge Bomb  
+- Shadow Ball  
+- Icy Wind  
+- Protect  
+
+Annihilape @ Choice Scarf  
+Ability: Defiant  
+Jolly Nature  
+- Close Combat  
+- Shadow Claw  
+- Rock Tomb  
+- U-turn  
+
+Incineroar @ Sitrus Berry  
+Ability: Intimidate  
+Careful Nature  
+- Flare Blitz  
+- Throat Chop  
+- Parting Shot  
+- Fake Out  
+
+Swampert @ Swampertite  
+Ability: Torrent  
+Adamant Nature  
+- Wave Crash  
+- High Horsepower  
+- Yawn  
+- Protect  
+
+Archaludon @ Leftovers  
+Ability: Stamina  
+Bold Nature  
+- Flash Cannon  
+- Draco Meteor  
+- Electro Shot  
+- Protect  
+
+Pelipper @ Focus Sash  
+Ability: Drizzle  
+Timid Nature  
+- Weather Ball  
+- Hurricane  
+- Tailwind  
+- Wide Guard  
+

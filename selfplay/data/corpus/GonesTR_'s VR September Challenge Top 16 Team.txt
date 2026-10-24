@@ -1,0 +1,49 @@
+Farigiraf @ Sitrus Berry  
+Ability: Armor Tail  
+Quiet Nature  
+- Expanding Force  
+- Thunderbolt  
+- Trick Room  
+- Protect  
+
+Incineroar @ White Herb  
+Ability: Intimidate  
+Brave Nature  
+- Fake Out  
+- Throat Chop  
+- Close Combat  
+- Flare Blitz  
+
+Indeedee-F @ Psychic Seed  
+Ability: Psychic Surge  
+Level: 51  
+Relaxed Nature  
+- Psychic  
+- Healing Wish  
+- Follow Me  
+- Trick Room  
+
+Hatterene @ Life Orb  
+Ability: Magic Bounce  
+Quiet Nature  
+- Expanding Force  
+- Dazzling Gleam  
+- Trick Room  
+- Protect  
+
+Kingambit @ Black Glasses  
+Ability: Defiant  
+Brave Nature  
+- Kowtow Cleave  
+- Sucker Punch  
+- Protect  
+- Iron Head  
+
+Camerupt @ Cameruptite  
+Ability: Anger Point  
+Quiet Nature  
+- Ancient Power  
+- Earth Power  
+- Heat Wave  
+- Protect  
+

@@ -1,0 +1,54 @@
+Charizard @ Charizardite Y  
+Ability: Blaze  
+EVs: 30 HP / 30 Def / 1 SpA / 5 Spe  
+Modest Nature  
+- Heat Wave  
+- Weather Ball  
+- Ancient Power  
+- Protect  
+
+Kingambit @ Chople Berry  
+Ability: Defiant  
+EVs: 32 HP / 32 Atk / 2 Def  
+Adamant Nature  
+- Kowtow Cleave  
+- Sucker Punch  
+- Iron Head  
+- Protect  
+
+Meowstic-F @ Meowsticite  
+Ability: Competitive  
+EVs: 10 HP / 24 SpA / 32 Spe  
+Timid Nature  
+- Expanding Force  
+- Thunderbolt  
+- Fake Out  
+- Protect  
+
+Sneasler @ Psychic Seed  
+Ability: Unburden  
+EVs: 2 HP / 32 Atk / 32 Spe  
+Adamant Nature  
+- Close Combat  
+- Dire Claw  
+- Rock Slide  
+- Protect  
+
+Indeedee @ Focus Sash  
+Ability: Psychic Surge  
+EVs: 2 HP / 32 SpA / 32 Spe  
+Timid Nature  
+- Expanding Force  
+- Energy Ball  
+- Imprison  
+- Trick Room  
+
+Kommo-o @ Leftovers  
+Ability: Soundproof  
+EVs: 10 HP / 1 Def / 20 SpA / 3 SpD / 32 Spe  
+Modest Nature  
+- Clanging Scales  
+- Aura Sphere  
+- Clangorous Soul  
+- Protect  
+

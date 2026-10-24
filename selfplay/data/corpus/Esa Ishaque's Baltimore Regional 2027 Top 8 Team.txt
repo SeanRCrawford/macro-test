@@ -1,0 +1,48 @@
+Froslass @ Froslassite  
+Ability: Cursed Body  
+Timid Nature  
+- Blizzard  
+- Shadow Ball  
+- Aurora Veil  
+- Protect  
+
+Raichu @ Raichunite Y  
+Ability: Lightning Rod  
+Timid Nature  
+- Zap Cannon  
+- Focus Blast  
+- Encore  
+- Protect  
+
+Rillaboom @ Sitrus Berry  
+Ability: Grassy Surge  
+Adamant Nature  
+- Fake Out  
+- Grassy Glide  
+- Wood Hammer  
+- High Horsepower  
+
+Kingambit @ Life Orb  
+Ability: Defiant  
+Adamant Nature  
+- Kowtow Cleave  
+- Sucker Punch  
+- Swords Dance  
+- Protect  
+
+Sneasler @ White Herb  
+Ability: Unburden  
+Adamant Nature  
+- Close Combat  
+- Dire Claw  
+- Fake Out  
+- Protect  
+
+Arcanine-Hisui @ Focus Sash  
+Ability: Rock Head  
+Jolly Nature  
+- Flare Blitz  
+- Head Smash  
+- Extreme Speed  
+- Protect  
+

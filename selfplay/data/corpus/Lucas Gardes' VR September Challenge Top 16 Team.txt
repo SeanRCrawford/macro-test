@@ -1,0 +1,48 @@
+Indeedee-F @ Colbur Berry  
+Ability: Psychic Surge  
+Sassy Nature  
+- Protect  
+- Follow Me  
+- Psychic  
+- Helping Hand  
+
+Gardevoir @ Gardevoirite  
+Ability: Trace  
+Modest Nature  
+- Protect  
+- Hyper Voice  
+- Expanding Force  
+- Thunderbolt  
+
+Staraptor @ Staraptite  
+Ability: Intimidate  
+Jolly Nature  
+- Protect  
+- Close Combat  
+- Brave Bird  
+- Roost  
+
+Armarouge @ Focus Sash  
+Ability: Flash Fire  
+Timid Nature  
+- Protect  
+- Expanding Force  
+- Armor Cannon  
+- Wide Guard  
+
+Sneasler @ Psychic Seed  
+Ability: Unburden  
+Adamant Nature  
+- Protect  
+- Dire Claw  
+- Close Combat  
+- Rock Slide  
+
+Annihilape @ Choice Scarf  
+Ability: Defiant  
+Jolly Nature  
+- Close Combat  
+- Ice Punch  
+- Phantom Force  
+- Shadow Claw  
+

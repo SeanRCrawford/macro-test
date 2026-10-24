@@ -1,7 +1,7 @@
 Incineroar @ Sitrus Berry
 Ability: Intimidate
 Level: 50
-Nature: Impish
+Impish Nature
 - Fake Out
 - Parting Shot
 - Flare Blitz
@@ -10,7 +10,7 @@ Nature: Impish
 Toxapex @ Leftovers
 Ability: Regenerator
 Level: 50
-Nature: Relaxed
+Relaxed Nature
 - Baneful Bunker
 - Infestation
 - Toxic
@@ -19,7 +19,7 @@ Nature: Relaxed
 Garchomp @ Choice Scarf
 Ability: Rough Skin
 Level: 50
-Nature: Adamant
+Adamant Nature
 - Stomping Tantrum
 - Earthquake
 - Dragon Claw
@@ -28,7 +28,7 @@ Nature: Adamant
 Charizard @ Charizardite Y
 Ability: Blaze
 Level: 50
-Nature: Timid
+Timid Nature
 - Protect
 - Heat Wave
 - Solar Beam
@@ -37,7 +37,7 @@ Nature: Timid
 Venusaur @ Focus Sash
 Ability: Chlorophyll
 Level: 50
-Nature: Modest
+Modest Nature
 - Protect
 - Sludge Bomb
 - Earth Power
@@ -46,7 +46,7 @@ Nature: Modest
 Sylveon @ Fairy Feather
 Ability: Pixilate
 Level: 50
-Nature: Quiet
+Quiet Nature
 - Detect
 - Hyper Voice
 - Quick Attack

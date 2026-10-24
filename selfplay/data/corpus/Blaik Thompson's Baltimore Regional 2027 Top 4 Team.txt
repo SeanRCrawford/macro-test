@@ -1,0 +1,48 @@
+Salamence @ Salamencite  
+Ability: Intimidate  
+Timid Nature  
+- Heat Wave  
+- Draco Meteor  
+- Hyper Voice  
+- Protect  
+
+Arcanine-Hisui @ Focus Sash  
+Ability: Rock Head  
+Jolly Nature  
+- Flare Blitz  
+- Head Smash  
+- Extreme Speed  
+- Protect  
+
+Indeedee @ Choice Scarf  
+Ability: Psychic Surge  
+Modest Nature  
+- Expanding Force  
+- Trick  
+- Trick Room  
+- Imprison  
+
+Milotic @ Leftovers  
+Ability: Competitive  
+Calm Nature  
+- Scald  
+- Ice Beam  
+- Icy Wind  
+- Protect  
+
+Metagross @ Metagrossite  
+Ability: Clear Body  
+Adamant Nature  
+- Steel Roller  
+- Psychic Fangs  
+- Body Press  
+- Protect  
+
+Sneasler @ Psychic Seed  
+Ability: Unburden  
+Adamant Nature  
+- Throat Chop  
+- Close Combat  
+- Rock Slide  
+- Protect  
+

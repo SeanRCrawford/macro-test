@@ -1,0 +1,298 @@
+"""Tree search (DESIGN.md 4.16): the network-guided simultaneous-move search
+over many games at once. The tree lives in Rust (engine/src/mcts.rs); this
+module runs the network for it in batches.
+
+Each wave: the trees run their simulations (`select`); the new nodes get a
+policy from the network (each side's legal actions, ranked, from its own
+view); the new cells' chance outcomes are played (`expand`) and valued by
+the network (`set_values`), and the trees back the values up. A root stops
+when it has spent `budget` value evaluations or is solved.
+
+    python -m selfplay.search MODEL --tree --tree-budget 2000 --vs-search
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, fields
+
+import numpy as np
+import torch
+
+from selfplay.env import SIZES, SelfPlayEnv
+
+MASK = SIZES["mask_len"]
+
+
+@dataclass
+class TreeConfig:
+    budget: int = 2000          # value evaluations per root
+    root_candidates: int = 4    # candidates per side a root starts with
+    node_candidates: int = 2    # ... and any other node
+    max_candidates: int = 12
+    widen: float = 0.5          # candidates allowed: start + widen * sqrt(visits)
+    c_explore: float = 1.0      # prior bonus in action selection
+    chance_floor: float = 0.1   # outcome selection weight of a decided position
+    static_weight: float = 1.0  # a node's own estimate counts as this many visits
+    max_outcomes: int = 16
+    roll_bands: int = 1
+    solve_iters: int = 200
+    max_depth: int = 8
+    sims_per_wave: int = 4
+    max_wave_scale: int = 16    # trees still running simulate up to this many times more per wave
+    root_oracle: bool = True    # widen the root by best reply (Nessie's double oracle)
+    oracle_eps: float = 0.005
+    root_greedy: bool = True    # the greedy damage action is always a root candidate
+    oracle_pool: int = 24       # actions the root's double oracle considers (0: every legal one)
+    endgame: int = 2            # nodes with at most this many Pokemon a side: full width, provable
+    endgame_outcomes: int = 64  # chance outcomes per cell there
+    endgame_budget: float = 4.0 # an endgame root may spend this many times the budget
+    full_depth: int = 0         # levels searched full width by best reply (1: the root, as Nessie)
+    probe_outcomes: int = 8     # chance outcomes per screening probe
+    max_probes: int = 64        # probe cells one double-oracle step makes (the rest later)
+    prior_top: int = 24         # ranked actions kept per side from the policy
+    root_noise: float = 0.0     # Dirichlet noise share at the roots (self-play exploration)
+    noise_alpha: float = 0.3
+    leaf_batch: int = 8192
+    sample: bool = True         # play a sample of the root mix (else its most likely action)
+    half: bool = True           # leaf values in float16 on CUDA (most of the network's time)
+    # Not sampling: among the actions the mix plays (at least 5% and a
+    # quarter of its top weight) that are within this much (side 0's value,
+    # 2 = the whole range) of the best against the opponent's equilibrium
+    # mix, play the one that does best against all its likely replies (its
+    # policy's), not whichever the solver happened to weight most. An action
+    # that only ties because the equilibrium expects one reply loses that
+    # tie. 0: the mix's most likely action.
+    tiebreak: float = 0.02
+    max_seconds: float = 0.0    # stop a search after this long (0: only the budget)
+    # The root widens (its first turn, by double oracle) only until this
+    # share of the budget is spent; the rest looks further down its likely
+    # plays, the turns after them (1: the root may widen all along).
+    root_share: float = 1.0
+
+    def engine_kwargs(self) -> dict:
+        keys = ("root_candidates", "node_candidates", "max_candidates", "widen", "c_explore",
+                "chance_floor", "static_weight", "max_outcomes", "roll_bands", "solve_iters",
+                "max_depth", "sims_per_wave", "root_oracle", "oracle_eps", "root_greedy",
+                "oracle_pool", "endgame", "endgame_outcomes", "endgame_budget", "full_depth",
+                "max_wave_scale", "max_probes", "probe_outcomes", "root_share")
+        return {k: getattr(self, k) for k in keys}
+
+
+class TreeSearch:
+    def __init__(self, model, cfg: TreeConfig = TreeConfig(), seed: int = 0, value_model=None):
+        self.model, self.cfg = model, cfg
+        # The leaves' values can come from another network (to test a
+        # policy and a value apart).
+        self.value_model = value_model or model
+        self.dev = next(model.parameters()).device
+        self.rng = np.random.default_rng(seed)
+        self.stats = {"roots": 0, "leaves": 0, "nodes": 0, "gap": 0.0, "seconds": 0.0,
+                      "net_seconds": 0.0, "depth": 0, "waves": 0, "exact": 0, "max_wave": 0}
+
+    def _t(self, a):
+        return torch.from_numpy(np.ascontiguousarray(a)).to(self.dev)
+
+    @torch.no_grad()
+    def _priors(self, forest, n: int, noise: bool):
+        s, m = SIZES, self.cfg.prior_top
+        ints = np.empty((n, 2, s["tokens"], s["int_fields"]), np.int32)
+        mons = np.empty((n, 2, s["tokens"], s["mon_floats"]), np.float32)
+        fld = np.empty((n, 2, s["field_floats"]), np.float32)
+        masks = np.empty((n, 2, MASK), np.uint8)
+        dec = np.empty((n, 2), np.uint8)
+        forest.policy_inputs(ints, mons, fld, masks, dec)
+        flat = lambda a: a.reshape(-1, *a.shape[2:])
+        actions = np.full((n * 2, m), -1, np.int64)
+        probs = np.zeros((n * 2, m), np.float32)
+        for i in range(0, n * 2, self.cfg.leaf_batch):
+            j = min(n * 2, i + self.cfg.leaf_batch)
+            logp, _ = self.model(*(self._t(flat(a)[i:j]) for a in (ints, mons, fld, masks, dec)))
+            legal = self._t(flat(masks)[i:j]).bool()
+            p = logp.exp().masked_fill(~legal, 0.0)
+            if noise and self.cfg.root_noise > 0:
+                # AlphaZero's root noise: some exploration the prior wouldn't give.
+                d = torch.distributions.Dirichlet(torch.full_like(p, self.cfg.noise_alpha)).sample()
+                d = d.masked_fill(~legal, 0.0)
+                d = d / d.sum(-1, keepdim=True).clamp(min=1e-9)
+                p = (1 - self.cfg.root_noise) * p + self.cfg.root_noise * d
+            top = p.topk(min(m, p.shape[-1]), -1)
+            ok = (top.values > 0).cpu().numpy()
+            a = top.indices.cpu().numpy()
+            pr = top.values.cpu().numpy()
+            actions[i:j, :a.shape[1]] = np.where(ok, a, -1)
+            probs[i:j, :a.shape[1]] = np.where(ok, pr, 0.0)
+        return actions.reshape(n, 2, m), probs.reshape(n, 2, m)
+
+    @torch.no_grad()
+    def _values(self, forest, n: int) -> np.ndarray:
+        s = SIZES
+        out = np.empty(n, np.float32)
+        half = self.cfg.half and self.dev.type == "cuda"
+        for i in range(0, n, self.cfg.leaf_batch):
+            j = min(n, i + self.cfg.leaf_batch)
+            # A chunk at a time, so memory stays bounded however many leaves.
+            ints = np.empty((j - i, 2, s["tokens"], s["int_fields"]), np.int32)
+            mons = np.empty((j - i, 2, s["tokens"], s["mon_floats"]), np.float32)
+            fld = np.empty((j - i, 2, s["field_floats"]), np.float32)
+            forest.leaf_inputs(ints, mons, fld, i)
+            # float16: closer to float32 than bfloat16 on ppo6k (values off by
+            # 0.0003 on average against 0.0022; selfplay.precision) and no
+            # overflow.
+            with torch.autocast("cuda", dtype=torch.float16, enabled=half):
+                v = self.value_model.value(*(self._t(a.reshape(-1, *a.shape[2:])) for a in (ints, mons, fld)))
+            v = v.float().view(-1, 2)
+            # Side 0's value: its own estimate and the negation of side 1's.
+            out[i:j] = ((v[:, 0] - v[:, 1]) / 2).cpu().numpy()
+        return out
+
+    def search(self, env: SelfPlayEnv, games, noise: bool = False) -> list[dict]:
+        """Search the current positions of `games`. Per game: candidates,
+        priors, matrix, row, col (equilibrium mixes), value, gap, visits,
+        alternatives, and tree statistics."""
+        t0 = time.perf_counter()
+        c = self.cfg
+        forest = env._env.mcts(list(map(int, games)), seed=int(self.rng.integers(1 << 62)),
+                               **c.engine_kwargs())
+        first = True
+        waves = 0
+        net = 0.0  # seconds in the network (with its input copies), not the engine
+        while waves < 100_000:
+            waves += 1
+            if c.max_seconds and waves > 2 and time.perf_counter() - t0 > c.max_seconds:
+                break  # out of time: the roots' solutions as they stand
+            n = forest.select(c.budget)
+            if n:
+                t = time.perf_counter()
+                actions, probs = self._priors(forest, n, noise and first)
+                net += time.perf_counter() - t
+                forest.set_policy(actions, probs, c.prior_top)
+            first = False
+            m = forest.expand()
+            self.stats["max_wave"] = max(self.stats["max_wave"], m)
+            if m:
+                t = time.perf_counter()
+                values = self._values(forest, m)
+                net += time.perf_counter() - t
+                forest.set_values(values)
+            # A wave can work without new nodes or leaves (cells whose
+            # outcomes all end the game): stop on the forest's own word.
+            if forest.finished(c.budget):
+                break
+        out = forest.results()
+        s = self.stats
+        for r in out:
+            add_alternatives(r)
+            s["leaves"] += r["leaf_evals"]
+            s["nodes"] += r["nodes"]
+            s["depth"] += r["max_depth"]
+            s["exact"] += int(r["exact"])
+            s["gap"] += r["gap"]
+        s["roots"] += len(out)
+        s["waves"] += waves
+        s["net_seconds"] += net
+        s["seconds"] += time.perf_counter() - t0
+        return out
+
+    # The same interface as selfplay.search.Search.
+    def run(self, env: SelfPlayEnv, games, noise: bool = False) -> list[dict]:
+        return self.search(env, games, noise)
+
+    def pick(self, result: dict, side: int) -> int:
+        mix = np.asarray(result["row" if side == 0 else "col"], np.float64)
+        cand = result["candidates"][side]
+        mix = np.clip(mix, 0, None)
+        if mix.sum() <= 0:
+            mix = np.ones(len(cand))
+        if self.cfg.sample:
+            return cand[self.rng.choice(len(mix), p=mix / mix.sum())]
+        j = int(mix.argmax())
+        if self.cfg.tiebreak > 0:
+            j = tiebreak(result, side, self.cfg.tiebreak, j)
+        return cand[j]
+
+    def act(self, env: SelfPlayEnv, games, side: int) -> np.ndarray:
+        return np.array([self.pick(r, side) for r in self.run(env, games)], np.int64)
+
+
+def tiebreak(r: dict, side: int, eps: float, default: int) -> int:
+    """The candidate (index) to play: among those the side's mix plays (at
+    least 5% and a quarter of its top weight) within `eps` of the best
+    against the opponent's equilibrium mix, the best against its policy's
+    likely replies (a refinement: weakly dominated actions lose their
+    ties). Only the mix's own choices: the policy's picture of the opponent
+    is too rough to bring back actions the search set aside. `default` if
+    the matrix is missing."""
+    c0, c1 = r["candidates"]
+    if not c0 or not c1 or len(r.get("matrix", ())) != len(c0) * len(c1):
+        return default
+    m = np.nan_to_num(np.asarray(r["matrix"], np.float64).reshape(len(c0), len(c1)))
+    if side == 1:
+        m = -m.T  # side 1's results, its candidates as rows
+    opp_mix = np.clip(np.asarray(r["col" if side == 0 else "row"], np.float64), 0, None)
+    opp_prior = np.clip(np.asarray(r["priors"][1 - side], np.float64), 0, None)
+    if opp_mix.sum() <= 0 or len(opp_prior) != m.shape[1]:
+        return default
+    if opp_prior.sum() <= 0:
+        opp_prior = np.ones(m.shape[1])
+    own = np.clip(np.asarray(r["row" if side == 0 else "col"], np.float64), 0, None)
+    if len(own) != m.shape[0] or own.max() <= 0:
+        return default
+    eq = m @ (opp_mix / opp_mix.sum())
+    broad = m @ (opp_prior / opp_prior.sum())
+    played = own >= max(0.05, 0.25 * own.max())
+    near = np.flatnonzero(played & (eq >= eq[played].max() - eps))
+    return int(near[np.argmax(broad[near])]) if len(near) else default
+
+
+def lookahead_of(r: dict, action: int) -> float:
+    """Turns beyond the first the search's value of `action` looks, over
+    the opponent's equilibrium play (nan if it wasn't a candidate)."""
+    c0, c1 = r.get("candidates", ([], []))
+    if action not in c0 or "lookahead" not in r:
+        return float("nan")
+    la = np.asarray(r["lookahead"]).reshape(len(c0), len(c1))
+    y = np.clip(np.asarray(r["col"], np.float64), 0, None)
+    return float(la[c0.index(action)] @ (y / max(y.sum(), 1e-9)))
+
+
+def add_alternatives(r: dict) -> None:
+    """Each candidate's loss against the opponent's equilibrium mix (0 for
+    the actions in the mix's support), best first."""
+    rows, cols = len(r["candidates"][0]), len(r["candidates"][1])
+    if not rows or not cols:
+        r["alternatives"] = ([], [])
+        return
+    m = np.asarray(r["matrix"], np.float64).reshape(rows, cols)
+    x, y, v = np.asarray(r["row"]), np.asarray(r["col"]), r["value"]
+    u0, u1 = m @ y, x @ m
+    r["alternatives"] = (
+        sorted(((a, float(v - q)) for a, q in zip(r["candidates"][0], u0)), key=lambda t: t[1]),
+        sorted(((b, float(q - v)) for b, q in zip(r["candidates"][1], u1)), key=lambda t: t[1]),
+    )
+
+
+def with_settings(cfg: TreeConfig, text: str) -> TreeConfig:
+    """`cfg` with 'key=value,key=value' (TreeConfig fields) applied."""
+    kinds = {f.name for f in fields(TreeConfig)}
+    for kv in filter(None, text.split(",")):
+        k, v = (x.strip() for x in kv.split("="))
+        if k not in kinds:
+            raise ValueError(f"no search setting {k!r} (TreeConfig: {', '.join(sorted(kinds))})")
+        cur = getattr(cfg, k)
+        setattr(cfg, k, (v.lower() in ("1", "true", "yes")) if isinstance(cur, bool) else type(cur)(v))
+    return cfg
+
+
+def config_from(args, prefix: str = "tree_") -> TreeConfig:
+    return TreeConfig(**{f.name: getattr(args, prefix + f.name) for f in fields(TreeConfig)})
+
+
+def config_args(p, prefix: str = "tree-") -> None:
+    for f in fields(TreeConfig):
+        name, v = prefix + f.name.replace("_", "-"), getattr(TreeConfig(), f.name)
+        dest = prefix.replace("-", "_") + f.name
+        if isinstance(v, bool):
+            p.add_argument(f"--{prefix}no-{f.name.replace('_', '-')}" if v else f"--{name}", dest=dest,
+                           action="store_false" if v else "store_true")
+        else:
+            p.add_argument(f"--{name}", dest=dest, type=type(v), default=v)

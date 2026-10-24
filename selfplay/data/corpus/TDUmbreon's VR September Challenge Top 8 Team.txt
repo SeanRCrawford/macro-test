@@ -1,0 +1,51 @@
+Charizard @ Charizardite Y  
+Ability: Blaze  
+Shiny: Yes  
+Modest Nature  
+- Protect  
+- Weather Ball  
+- Heat Wave  
+- Solar Beam  
+
+Kingambit @ Focus Sash  
+Ability: Defiant  
+Shiny: Yes  
+Adamant Nature  
+- Kowtow Cleave  
+- Iron Head  
+- Sucker Punch  
+- Low Kick  
+
+Sylveon @ Fairy Feather  
+Ability: Pixilate  
+Modest Nature  
+- Detect  
+- Hyper Voice  
+- Hyper Beam  
+- Quick Attack  
+
+Aerodactyl @ Aerodactylite  
+Ability: Unnerve  
+Jolly Nature  
+- Rock Slide  
+- Ice Fang  
+- Dual Wingbeat  
+- Tailwind  
+
+Farigiraf @ Sitrus Berry  
+Ability: Armor Tail  
+Shiny: Yes  
+Bold Nature  
+- Protect  
+- Psychic  
+- Thunderbolt  
+- Trick Room  
+
+Garchomp @ Life Orb  
+Ability: Rough Skin  
+Jolly Nature  
+- Protect  
+- Earthquake  
+- Dragon Claw  
+- Rock Tomb  
+

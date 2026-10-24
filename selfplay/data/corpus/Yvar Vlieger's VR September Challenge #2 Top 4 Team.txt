@@ -1,0 +1,48 @@
+Meowstic-F @ Meowsticite  
+Ability: Competitive  
+Timid Nature  
+- Expanding Force  
+- Thunderbolt  
+- Fake Out  
+- Protect  
+
+Kommo-o @ Leftovers  
+Ability: Soundproof  
+Modest Nature  
+- Clanging Scales  
+- Aura Sphere  
+- Clangorous Soul  
+- Protect  
+
+Indeedee @ Focus Sash  
+Ability: Psychic Surge  
+Timid Nature  
+- Expanding Force  
+- Energy Ball  
+- Trick Room  
+- Imprison  
+
+Sneasler @ Psychic Seed  
+Ability: Unburden  
+Adamant Nature  
+- Close Combat  
+- Dire Claw  
+- Rock Slide  
+- Protect  
+
+Kingambit @ Chople Berry  
+Ability: Defiant  
+Adamant Nature  
+- Iron Head  
+- Kowtow Cleave  
+- Sucker Punch  
+- Protect  
+
+Charizard @ Charizardite Y  
+Ability: Blaze  
+Modest Nature  
+- Weather Ball  
+- Heat Wave  
+- Ancient Power  
+- Protect  
+

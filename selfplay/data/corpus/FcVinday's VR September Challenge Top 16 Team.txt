@@ -1,0 +1,48 @@
+Charizard @ Charizardite Y  
+Ability: Solar Power  
+Modest Nature  
+- Protect  
+- Ancient Power  
+- Heat Wave  
+- Weather Ball  
+
+Hydreigon @ Roseli Berry  
+Ability: Levitate  
+Timid Nature  
+- Snarl  
+- Dark Pulse  
+- U-turn  
+- Draco Meteor  
+
+Grimmsnarl @ Light Clay  
+Ability: Prankster  
+Careful Nature  
+- Spirit Break  
+- Reflect  
+- Light Screen  
+- Parting Shot  
+
+Pelipper @ Sitrus Berry  
+Ability: Drizzle  
+Modest Nature  
+- Tailwind  
+- Wide Guard  
+- Weather Ball  
+- Hurricane  
+
+Golisopod @ Golisopite  
+Ability: Emergency Exit  
+Adamant Nature  
+- Iron Head  
+- Sucker Punch  
+- Swords Dance  
+- Leech Life  
+
+Archaludon @ Leftovers  
+Ability: Stamina  
+Calm Nature  
+- Protect  
+- Electro Shot  
+- Flash Cannon  
+- Dragon Pulse  
+

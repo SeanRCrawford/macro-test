@@ -17,3 +17,9 @@ matrix_cache.pkl
 # tools/_harness.py's load_world() cache: machine-local, rebuilt automatically
 # whenever the underlying data files change (see _fingerprint())
 tools/.world_cache.pkl
+
+# selfplay engine build output
+selfplay/target/
+selfplay/dist/
+selfplay/python/selfplay/*.so
+selfplay/python/selfplay/*.pyd
